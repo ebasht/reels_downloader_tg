@@ -1,7 +1,7 @@
 package instagram
 
 import (
-	"net/url"
+	"encoding/json"
 	"testing"
 )
 
@@ -49,25 +49,27 @@ func TestParseEmbedImageURL(t *testing.T) {
 	}
 }
 
-func TestIsAllowedURL(t *testing.T) {
-	tests := map[string]bool{
-		"https://www.instagram.com/p/x/":                   true,
-		"https://scontent-ams2-1.cdninstagram.com/v/a.jpg": true,
-		"https://scontent.xx.fbcdn.net/a.jpg":              true,
-		"http://www.instagram.com/p/x/":                    false,
-		"https://evil.com/a.jpg":                           false,
-		"https://instagram.com.evil.com/a.jpg":             false,
-		"https://evilcdninstagram.com/a.jpg":               false,
-		"https://169.254.169.254/latest/meta-data":         false,
+func TestParseCarouselImageURLs(t *testing.T) {
+	doc := `{"context":{"type":"GraphSidecar"},"gql_data":{"shortcode_media":{"__typename":"GraphSidecar",` +
+		`"edge_sidecar_to_children":{"edges":[` +
+		`{"node":{"is_video":false,"display_url":"https://scontent.cdninstagram.com/1.jpg?a=1\u0026b=2"}},` +
+		`{"node":{"is_video":true,"display_url":"https://scontent.cdninstagram.com/video-cover.jpg"}},` +
+		`{"node":{"is_video":false,"display_url":"https://scontent.cdninstagram.com/2.jpg"}}]}}}}`
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for raw, want := range tests {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := isAllowedURL(u); got != want {
-			t.Errorf("isAllowedURL(%q) = %v, want %v", raw, got, want)
-		}
+	page := `<script>{"isSidecar":true,"contextJSON":` + string(encoded) + `,"other":1}</script>`
+
+	got := parseCarouselImageURLs(page)
+	want := []string{"https://scontent.cdninstagram.com/1.jpg?a=1&b=2", "https://scontent.cdninstagram.com/2.jpg"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	single := `{"contextJSON":"{\"context\":{\"type\":\"GraphImage\"},\"gql_data\":null}"}`
+	if got := parseCarouselImageURLs(single); got != nil {
+		t.Fatalf("single post: got %q, want nil", got)
 	}
 }
 

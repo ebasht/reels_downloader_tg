@@ -2,26 +2,22 @@ package instagram
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"log"
-	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
+	"video_download_bot/internal/adapter/web"
 	"video_download_bot/internal/domain"
 )
 
 const (
-	// Instagram serves full OpenGraph tags (first image + caption) to link
-	// preview crawlers without requiring a login.
-	crawlerUserAgent = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
-	maxPageBytes     = 5 * 1024 * 1024
-	maxImageBytes    = 10 * 1024 * 1024
+	maxPageBytes  = 5 * 1024 * 1024
+	maxImageBytes = 10 * 1024 * 1024
+	maxPostImages = 20 // Instagram's carousel limit
 )
 
 var (
@@ -32,40 +28,16 @@ var (
 	titleCaptionRe  = regexp.MustCompile(`(?s)on Instagram:\s*"(.*)"\s*$`)
 	embedImageTagRe = regexp.MustCompile(`<img\b[^>]*\bclass="EmbeddedMediaImage"[^>]*>`)
 	srcAttrRe       = regexp.MustCompile(`\bsrc="([^"]+)"`)
+	contextJSONRe   = regexp.MustCompile(`"contextJSON":("(?:[^"\\]|\\.)*")`)
 )
 
 type PostFetcher struct {
-	client *http.Client
+	web *web.Client
 }
 
 func NewPostFetcher(timeout time.Duration) *PostFetcher {
-	return &PostFetcher{client: &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("too many redirects")
-			}
-			if !isAllowedURL(req.URL) {
-				return fmt.Errorf("redirect to disallowed host %q", req.URL.Host)
-			}
-			return nil
-		},
-	}}
-}
-
-// isAllowedURL restricts fetches to Instagram and its CDNs: image URLs come
-// from page HTML and must not point the bot at arbitrary hosts.
-func isAllowedURL(u *url.URL) bool {
-	if u.Scheme != "https" {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	for _, domain := range []string{"instagram.com", "cdninstagram.com", "fbcdn.net"} {
-		if host == domain || strings.HasSuffix(host, "."+domain) {
-			return true
-		}
-	}
-	return false
+	return &PostFetcher{web: web.NewClient(timeout, web.UserAgentFacebook, "en-US,en;q=0.9",
+		"instagram.com", "cdninstagram.com", "fbcdn.net")}
 }
 
 func (f *PostFetcher) FetchPost(ctx context.Context, postURL string) (*domain.Post, error) {
@@ -84,64 +56,98 @@ func (f *PostFetcher) FetchPost(ctx context.Context, postURL string) (*domain.Po
 		return nil, fmt.Errorf("%w: no og:image (private or deleted post?)", domain.ErrMediaNotFound)
 	}
 
-	// og:image is a 640x640 square crop; the embed page has the uncropped first photo.
-	var image []byte
-	if fullURL := f.embedImageURL(ctx, postURL); fullURL != "" {
-		if image, err = f.get(ctx, fullURL, maxImageBytes); err != nil {
-			log.Printf("instagram full-size image failed, using og:image: %v", err)
-			image = nil
+	// og:image is a 640x640 square crop of the first photo; the embed page has
+	// all carousel photos uncropped.
+	var images [][]byte
+	for _, u := range f.embedImageURLs(ctx, postURL) {
+		img, err := f.get(ctx, u, maxImageBytes)
+		if err != nil {
+			log.Printf("instagram full-size image failed: %v", err)
+			continue
 		}
+		images = append(images, img)
 	}
-	if image == nil {
-		if image, err = f.get(ctx, imageURL, maxImageBytes); err != nil {
+	if len(images) == 0 {
+		img, err := f.get(ctx, imageURL, maxImageBytes)
+		if err != nil {
 			return nil, fmt.Errorf("load image: %w", err)
 		}
+		images = [][]byte{img}
 	}
 
 	return &domain.Post{
-		Image:   image,
+		Images:  images,
 		Caption: extractCaption(tags),
 	}, nil
 }
 
 func (f *PostFetcher) get(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	resp, err := f.web.Get(ctx, rawURL, limit)
 	if err != nil {
 		return nil, err
 	}
-	if !isAllowedURL(req.URL) {
-		return nil, fmt.Errorf("disallowed host %q", req.URL.Host)
-	}
-	req.Header.Set("User-Agent", crawlerUserAgent)
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := f.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("response exceeds %d bytes", limit)
-	}
-	return body, nil
+	return resp.Body, nil
 }
 
-func (f *PostFetcher) embedImageURL(ctx context.Context, postURL string) string {
+func (f *PostFetcher) embedImageURLs(ctx context.Context, postURL string) []string {
 	page, err := f.get(ctx, strings.TrimSuffix(postURL, "/")+"/embed/captioned/", maxPageBytes)
 	if err != nil {
 		log.Printf("instagram embed page failed: %v", err)
-		return ""
+		return nil
 	}
-	return parseEmbedImageURL(string(page))
+	if urls := parseCarouselImageURLs(string(page)); len(urls) > 0 {
+		return urls
+	}
+	if u := parseEmbedImageURL(string(page)); u != "" {
+		return []string{u}
+	}
+	return nil
+}
+
+// parseCarouselImageURLs extracts carousel photos from the embed page's
+// contextJSON, a JSON document stored as a JSON string. Video items are
+// skipped. Returns nil for single-photo posts, which have no carousel data.
+func parseCarouselImageURLs(page string) []string {
+	m := contextJSONRe.FindStringSubmatch(page)
+	if m == nil {
+		return nil
+	}
+	var raw string
+	if err := json.Unmarshal([]byte(m[1]), &raw); err != nil {
+		return nil
+	}
+	var doc struct {
+		GQLData *struct {
+			ShortcodeMedia *struct {
+				Sidecar *struct {
+					Edges []struct {
+						Node struct {
+							IsVideo    bool   `json:"is_video"`
+							DisplayURL string `json:"display_url"`
+						} `json:"node"`
+					} `json:"edges"`
+				} `json:"edge_sidecar_to_children"`
+			} `json:"shortcode_media"`
+		} `json:"gql_data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return nil
+	}
+	if doc.GQLData == nil || doc.GQLData.ShortcodeMedia == nil || doc.GQLData.ShortcodeMedia.Sidecar == nil {
+		return nil
+	}
+
+	var urls []string
+	for _, e := range doc.GQLData.ShortcodeMedia.Sidecar.Edges {
+		if e.Node.IsVideo || e.Node.DisplayURL == "" {
+			continue
+		}
+		urls = append(urls, e.Node.DisplayURL)
+		if len(urls) == maxPostImages {
+			break
+		}
+	}
+	return urls
 }
 
 func parseEmbedImageURL(page string) string {

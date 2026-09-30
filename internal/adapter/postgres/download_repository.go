@@ -42,6 +42,7 @@ func (r *DownloadRepository) SaveDownload(ctx context.Context, d domain.Download
 			UPDATE chats SET
 				reels_downloaded = reels_downloaded + CASE WHEN $2::text = 'reel' THEN 1 ELSE 0 END,
 				posts_downloaded = posts_downloaded + CASE WHEN $2::text = 'post' THEN 1 ELSE 0 END,
+				listings_downloaded = listings_downloaded + CASE WHEN $2::text = 'listing' THEN 1 ELSE 0 END,
 				updated_at       = now()
 			WHERE id = $1`,
 			d.ChatID, string(d.Type),
@@ -55,14 +56,15 @@ func (r *DownloadRepository) SaveDownload(ctx context.Context, d domain.Download
 
 func (r *DownloadRepository) FindCached(ctx context.Context, shortcode string) (domain.Media, bool, error) {
 	var (
-		mediaType, fileID, caption string
-		width, height, duration    int
+		mediaType, caption      string
+		fileIDs                 []string
+		width, height, duration int
 	)
 	err := r.pool.QueryRow(ctx, `
-		SELECT media_type, file_id, caption, width, height, duration
+		SELECT media_type, file_ids, caption, width, height, duration
 		FROM media_cache WHERE shortcode = $1`,
 		shortcode,
-	).Scan(&mediaType, &fileID, &caption, &width, &height, &duration)
+	).Scan(&mediaType, &fileIDs, &caption, &width, &height, &duration)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Media{}, false, nil
 	}
@@ -70,13 +72,16 @@ func (r *DownloadRepository) FindCached(ctx context.Context, shortcode string) (
 		return domain.Media{}, false, fmt.Errorf("find cached media: %w", err)
 	}
 
+	if len(fileIDs) == 0 {
+		return domain.Media{}, false, nil
+	}
 	if domain.MediaType(mediaType) == domain.MediaReel {
 		return domain.Media{Cached: true, Video: &domain.Video{
-			FileID: fileID, Width: width, Height: height, Duration: duration,
+			FileID: fileIDs[0], Width: width, Height: height, Duration: duration,
 		}}, true, nil
 	}
 	return domain.Media{Cached: true, Post: &domain.Post{
-		ImageFileID: fileID, Caption: caption,
+		ImageFileIDs: fileIDs, Caption: caption,
 	}}, true, nil
 }
 
@@ -91,17 +96,17 @@ func (r *DownloadRepository) SaveCached(ctx context.Context, shortcode string, m
 	}
 
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO media_cache (shortcode, media_type, file_id, caption, width, height, duration)
+		INSERT INTO media_cache (shortcode, media_type, file_ids, caption, width, height, duration)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (shortcode) DO UPDATE SET
 			media_type = EXCLUDED.media_type,
-			file_id    = EXCLUDED.file_id,
+			file_ids   = EXCLUDED.file_ids,
 			caption    = EXCLUDED.caption,
 			width      = EXCLUDED.width,
 			height     = EXCLUDED.height,
 			duration   = EXCLUDED.duration,
 			updated_at = now()`,
-		shortcode, string(m.Type()), m.FileID(), caption, width, height, duration,
+		shortcode, string(m.Type()), m.FileIDs(), caption, width, height, duration,
 	)
 	if err != nil {
 		return fmt.Errorf("save cached media: %w", err)

@@ -1,25 +1,45 @@
 package telegram
 
 import (
+	"html"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-func TestSplitText(t *testing.T) {
-	text := strings.Repeat("а", 5) + "\n" + strings.Repeat("б", 5)
-	got := splitText(text, 8)
-	want := []string{strings.Repeat("а", 5) + "\n", strings.Repeat("б", 5)}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("got %q, want %q", got, want)
-	}
+var tagRe = regexp.MustCompile(`<[^>]+>`)
 
-	long := strings.Repeat("x", 10)
-	if got := splitText(long, 4); len(got) != 3 || strings.Join(got, "") != long {
+// visibleLen is the caption length as Telegram counts it after parsing HTML.
+func visibleLen(s string) int {
+	return utf16Len(html.UnescapeString(tagRe.ReplaceAllString(s, "")))
+}
+
+func TestCaptionHTMLShortIsEscaped(t *testing.T) {
+	if got := captionHTML("a < b & c"); got != "a &lt; b &amp; c" {
 		t.Fatalf("got %q", got)
 	}
+}
 
-	emoji := strings.Repeat("😀", 3) // 2 UTF-16 units each
-	if got := splitText(emoji, 4); len(got) != 2 || got[0] != "😀😀" {
-		t.Fatalf("got %q", got)
+func TestCaptionHTMLLongKeepsHeadAndCollapsesBody(t *testing.T) {
+	head := "Audi S4, 1999\n1 050 000 ₽"
+	caption := head + "\n\n" + strings.Repeat("текст & ", 300)
+	got := captionHTML(caption)
+
+	if !strings.HasPrefix(got, html.EscapeString(head)+"\n<blockquote expandable>") ||
+		!strings.HasSuffix(got, "…</blockquote>") {
+		t.Fatalf("unexpected layout: %.120q…%q", got, got[len(got)-40:])
+	}
+	if n := visibleLen(got); n > maxCaptionLen {
+		t.Fatalf("visible length %d > %d", n, maxCaptionLen)
+	}
+}
+
+func TestCaptionHTMLLongWithoutParagraphs(t *testing.T) {
+	got := captionHTML(strings.Repeat("😀", 600)) // 2 UTF-16 units each
+	if !strings.HasPrefix(got, "<blockquote expandable>😀") {
+		t.Fatalf("got %.60q", got)
+	}
+	if n := visibleLen(got); n > maxCaptionLen {
+		t.Fatalf("visible length %d > %d", n, maxCaptionLen)
 	}
 }

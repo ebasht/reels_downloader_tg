@@ -1,52 +1,12 @@
 package domain
 
-import (
-	"errors"
-	"fmt"
-	"regexp"
-	"strings"
-)
+import "errors"
 
 var (
 	ErrMediaNotFound = errors.New("media not found")
 	ErrPostIsVideo   = errors.New("post contains video")
 	ErrVideoTooLong  = errors.New("video is too long")
 )
-
-type LinkKind int
-
-const (
-	LinkReel LinkKind = iota + 1
-	LinkPost
-)
-
-type InstagramLink struct {
-	Kind      LinkKind
-	Shortcode string
-	URL       string
-}
-
-var instagramLinkRe = regexp.MustCompile(
-	`(?i)https?://(?:www\.|m\.)?instagram\.com/(?:[A-Za-z0-9_.]+/)?(p|reels?|tv)/([A-Za-z0-9_-]+)`,
-)
-
-// FindInstagramLink returns the first reel or post link found in text.
-func FindInstagramLink(text string) (InstagramLink, bool) {
-	m := instagramLinkRe.FindStringSubmatch(text)
-	if m == nil {
-		return InstagramLink{}, false
-	}
-
-	kind, path := LinkReel, "reel"
-	if strings.EqualFold(m[1], "p") {
-		kind, path = LinkPost, "p"
-	}
-	return InstagramLink{
-		Kind:      kind,
-		Shortcode: m[2],
-		URL:       fmt.Sprintf("https://www.instagram.com/%s/%s/", path, m[2]),
-	}, true
-}
 
 // Video is either a downloaded file (Path) or a file already stored on
 // Telegram servers (FileID).
@@ -61,12 +21,13 @@ type Video struct {
 	Release func()
 }
 
-// Post is the first photo of an Instagram post with its caption. The photo is
-// either downloaded bytes (Image) or a file on Telegram servers (ImageFileID).
+// Post holds photos with a caption: an Instagram post (all photos of a
+// carousel) or a car listing with its ad text. Photos are either downloaded
+// bytes (Images) or files on Telegram servers (ImageFileIDs).
 type Post struct {
-	Image       []byte
-	ImageFileID string
-	Caption     string
+	Images       [][]byte
+	ImageFileIDs []string
+	Caption      string
 }
 
 // Media holds exactly one of Video or Post.
@@ -78,15 +39,15 @@ type Media struct {
 	Cached bool
 }
 
-// FileID returns the Telegram file ID of the media, if it has one.
-func (m Media) FileID() string {
+// FileIDs returns the Telegram file IDs of the media, if it has them.
+func (m Media) FileIDs() []string {
 	switch {
-	case m.Video != nil:
-		return m.Video.FileID
+	case m.Video != nil && m.Video.FileID != "":
+		return []string{m.Video.FileID}
 	case m.Post != nil:
-		return m.Post.ImageFileID
+		return m.Post.ImageFileIDs
 	default:
-		return ""
+		return nil
 	}
 }
 

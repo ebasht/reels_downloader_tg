@@ -19,6 +19,10 @@ type PostFetcher interface {
 	FetchPost(ctx context.Context, url string) (*domain.Post, error)
 }
 
+type ListingFetcher interface {
+	FetchListing(ctx context.Context, link domain.Link) (*domain.Listing, error)
+}
+
 type DownloadRepository interface {
 	// SaveDownload stores the link and increments the chat's counter for its type.
 	SaveDownload(ctx context.Context, d domain.Download) error
@@ -31,17 +35,23 @@ type DownloadRepository interface {
 type MediaService struct {
 	reels     ReelDownloader
 	posts     PostFetcher
+	listings  ListingFetcher
 	downloads DownloadRepository
 }
 
-func NewMediaService(reels ReelDownloader, posts PostFetcher, downloads DownloadRepository) *MediaService {
-	return &MediaService{reels: reels, posts: posts, downloads: downloads}
+func NewMediaService(reels ReelDownloader, posts PostFetcher, listings ListingFetcher, downloads DownloadRepository) *MediaService {
+	return &MediaService{reels: reels, posts: posts, listings: listings, downloads: downloads}
 }
 
 // Fetch returns the media behind link, preferring files already sent to
 // Telegram. The caller must call Media.Release.
-func (s *MediaService) Fetch(ctx context.Context, link domain.InstagramLink) (domain.Media, error) {
-	cached, ok, err := s.downloads.FindCached(ctx, link.Shortcode)
+func (s *MediaService) Fetch(ctx context.Context, link domain.Link) (domain.Media, error) {
+	// Listings change (price, text), so they are always fetched fresh.
+	if link.Kind == domain.LinkListing {
+		return s.fetchListing(ctx, link)
+	}
+
+	cached, ok, err := s.downloads.FindCached(ctx, link.ID)
 	if err != nil {
 		log.Printf("media cache lookup: %v", err)
 	}
@@ -53,8 +63,8 @@ func (s *MediaService) Fetch(ctx context.Context, link domain.InstagramLink) (do
 
 // FetchFresh downloads the media from Instagram, bypassing and invalidating
 // the cache. Used when a cached Telegram file ID is no longer accepted.
-func (s *MediaService) FetchFresh(ctx context.Context, link domain.InstagramLink) (domain.Media, error) {
-	if err := s.downloads.DeleteCached(ctx, link.Shortcode); err != nil {
+func (s *MediaService) FetchFresh(ctx context.Context, link domain.Link) (domain.Media, error) {
+	if err := s.downloads.DeleteCached(ctx, link.ID); err != nil {
 		log.Printf("media cache invalidate: %v", err)
 	}
 
@@ -70,9 +80,19 @@ func (s *MediaService) FetchFresh(ctx context.Context, link domain.InstagramLink
 			return domain.Media{}, fmt.Errorf("fetch post %s: %w", link.URL, err)
 		}
 		return domain.Media{Post: post}, nil
+	case domain.LinkListing:
+		return s.fetchListing(ctx, link)
 	default:
 		return domain.Media{}, fmt.Errorf("unsupported link kind %d", link.Kind)
 	}
+}
+
+func (s *MediaService) fetchListing(ctx context.Context, link domain.Link) (domain.Media, error) {
+	l, err := s.listings.FetchListing(ctx, link)
+	if err != nil {
+		return domain.Media{}, fmt.Errorf("fetch listing %s: %w", link.URL, err)
+	}
+	return domain.Media{Post: &domain.Post{Images: l.Images, Caption: l.Caption()}}, nil
 }
 
 func (s *MediaService) fetchVideo(ctx context.Context, url string) (domain.Media, error) {
@@ -85,22 +105,25 @@ func (s *MediaService) fetchVideo(ctx context.Context, url string) (domain.Media
 
 // RecordDelivered saves media that was successfully sent to a chat. media must
 // carry the Telegram file ID returned by the send.
-func (s *MediaService) RecordDelivered(ctx context.Context, chatID int64, user domain.User, link domain.InstagramLink, media domain.Media) error {
+func (s *MediaService) RecordDelivered(ctx context.Context, chatID int64, user domain.User, link domain.Link, media domain.Media) error {
 	d := domain.Download{
 		ChatID:    chatID,
 		User:      user,
 		URL:       link.URL,
-		Shortcode: link.Shortcode,
+		Shortcode: link.ID,
 		Type:      media.Type(),
 		At:        time.Now(),
+	}
+	if link.Kind == domain.LinkListing {
+		d.Type = domain.MediaListing
 	}
 	if err := s.downloads.SaveDownload(ctx, d); err != nil {
 		return fmt.Errorf("save download %s in chat %d: %w", link.URL, chatID, err)
 	}
 
-	if !media.Cached && media.FileID() != "" {
-		if err := s.downloads.SaveCached(ctx, link.Shortcode, media); err != nil {
-			return fmt.Errorf("cache media %s: %w", link.Shortcode, err)
+	if !media.Cached && link.Kind != domain.LinkListing && len(media.FileIDs()) > 0 {
+		if err := s.downloads.SaveCached(ctx, link.ID, media); err != nil {
+			return fmt.Errorf("cache media %s: %w", link.ID, err)
 		}
 	}
 	return nil

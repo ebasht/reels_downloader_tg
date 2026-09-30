@@ -12,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"video_download_bot/internal/adapter/instagram"
+	"video_download_bot/internal/adapter/listing"
 	"video_download_bot/internal/adapter/postgres"
 	"video_download_bot/internal/config"
 	"video_download_bot/internal/delivery/telegram"
@@ -53,6 +54,7 @@ func main() {
 	media := usecase.NewMediaService(
 		instagram.NewReelDownloader(cfg.DownloadTimeout, cfg.MaxVideoDuration),
 		instagram.NewPostFetcher(cfg.PostFetchTimeout),
+		listing.NewFetcher(cfg.PostFetchTimeout),
 		postgres.NewDownloadRepository(pool),
 	)
 

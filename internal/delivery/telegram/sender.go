@@ -3,6 +3,8 @@ package telegram
 import (
 	"encoding/json"
 	"fmt"
+	"html"
+	"strings"
 	"unicode/utf16"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -13,7 +15,9 @@ import (
 // Telegram measures text limits in UTF-16 code units.
 const (
 	maxCaptionLen = 1024
-	maxMessageLen = 4096
+	maxAlbumSize  = 10
+	// maxHeadLen caps the paragraph kept outside the collapsed quote.
+	maxHeadLen = 300
 )
 
 // sendVideo sends the video and returns its Telegram file ID.
@@ -53,83 +57,138 @@ func (h *Handler) sendVideo(msg *tgbotapi.Message, v *domain.Video) (string, err
 	return sent.Video.FileID, nil
 }
 
-// sendPost sends the photo with its caption and returns the photo's Telegram file ID.
-func (h *Handler) sendPost(msg *tgbotapi.Message, p *domain.Post) (string, error) {
-	var file tgbotapi.RequestFileData = tgbotapi.FileBytes{Name: "photo.jpg", Bytes: p.Image}
-	if p.ImageFileID != "" {
-		file = tgbotapi.FileID(p.ImageFileID)
-	}
-	photo := tgbotapi.NewPhoto(msg.Chat.ID, file)
-	photo.ReplyToMessageID = msg.MessageID
-	photo.AllowSendingWithoutReply = true
-
-	fitsCaption := utf16Len(p.Caption) <= maxCaptionLen
-	if fitsCaption {
-		photo.Caption = p.Caption
+// sendPost sends the post's photos as one message (an album for carousels)
+// with the caption and returns the photos' Telegram file IDs in order.
+func (h *Handler) sendPost(msg *tgbotapi.Message, p *domain.Post) ([]string, error) {
+	files := postFiles(p)
+	if len(files) == 0 {
+		return nil, fmt.Errorf("post has no photos")
 	}
 
-	sent, err := h.api.Send(photo)
-	if err != nil {
-		return "", err
-	}
-	var fileID string
-	if n := len(sent.Photo); n > 0 {
-		fileID = sent.Photo[n-1].FileID
-	}
-	if fitsCaption {
-		return fileID, nil
-	}
+	caption := captionHTML(p.Caption)
 
-	for _, chunk := range splitText(p.Caption, maxMessageLen) {
-		text := tgbotapi.NewMessage(msg.Chat.ID, chunk)
-		text.ReplyToMessageID = sent.MessageID
-		text.AllowSendingWithoutReply = true
-		text.DisableWebPagePreview = true
-		if _, err := h.api.Send(text); err != nil {
-			return fileID, err
+	var fileIDs []string
+	for start := 0; start < len(files); start += maxAlbumSize {
+		chunk := files[start:min(start+maxAlbumSize, len(files))]
+		chunkCaption := ""
+		if start == 0 {
+			chunkCaption = caption
+		}
+
+		sent, err := h.sendPhotos(msg, chunk, chunkCaption)
+		if err != nil {
+			return fileIDs, err
+		}
+		for _, m := range sent {
+			if n := len(m.Photo); n > 0 {
+				fileIDs = append(fileIDs, m.Photo[n-1].FileID)
+			}
 		}
 	}
-	return fileID, nil
+	return fileIDs, nil
 }
 
-func (h *Handler) sendMedia(msg *tgbotapi.Message, m domain.Media) (string, error) {
+// captionHTML renders the caption as Telegram HTML. A caption over the limit
+// keeps its first paragraph visible and puts the rest, truncated, into an
+// expandable blockquote.
+func captionHTML(caption string) string {
+	if utf16Len(caption) <= maxCaptionLen {
+		return html.EscapeString(caption)
+	}
+
+	head, body := "", caption
+	if h, b, ok := strings.Cut(caption, "\n\n"); ok && utf16Len(h) <= maxHeadLen {
+		head, body = h, b
+	}
+	// The visible text is head + "\n" + body; tags don't count toward the limit.
+	budget := maxCaptionLen
+	if head != "" {
+		budget -= utf16Len(head) + 1
+	}
+	quote := "<blockquote expandable>" + html.EscapeString(truncateText(body, budget)) + "</blockquote>"
+	if head == "" {
+		return quote
+	}
+	return html.EscapeString(head) + "\n" + quote
+}
+
+// truncateText cuts s to at most limit UTF-16 units, ending with an ellipsis.
+func truncateText(s string, limit int) string {
+	if utf16Len(s) <= limit {
+		return s
+	}
+	size := 0
+	runes := []rune(s)
+	cut := 0
+	for cut < len(runes) {
+		w := len(utf16.Encode(runes[cut : cut+1]))
+		if size+w > limit-1 {
+			break
+		}
+		size += w
+		cut++
+	}
+	return strings.TrimRight(string(runes[:cut]), " \n\t,.;:") + "…"
+}
+
+// sendPhotos sends up to maxAlbumSize photos; albums need at least two.
+func (h *Handler) sendPhotos(msg *tgbotapi.Message, files []tgbotapi.RequestFileData, caption string) ([]tgbotapi.Message, error) {
+	if len(files) == 1 {
+		photo := tgbotapi.NewPhoto(msg.Chat.ID, files[0])
+		photo.ReplyToMessageID = msg.MessageID
+		photo.AllowSendingWithoutReply = true
+		photo.Caption = caption
+		photo.ParseMode = tgbotapi.ModeHTML
+		sent, err := h.api.Send(photo)
+		if err != nil {
+			return nil, err
+		}
+		return []tgbotapi.Message{sent}, nil
+	}
+
+	items := make([]interface{}, len(files))
+	for i, f := range files {
+		item := tgbotapi.NewInputMediaPhoto(f)
+		if i == 0 {
+			item.Caption = caption
+			item.ParseMode = tgbotapi.ModeHTML
+		}
+		items[i] = item
+	}
+	album := tgbotapi.NewMediaGroup(msg.Chat.ID, items)
+	album.ReplyToMessageID = msg.MessageID
+	return h.api.SendMediaGroup(album)
+}
+
+func postFiles(p *domain.Post) []tgbotapi.RequestFileData {
+	var files []tgbotapi.RequestFileData
+	if len(p.ImageFileIDs) > 0 {
+		for _, id := range p.ImageFileIDs {
+			files = append(files, tgbotapi.FileID(id))
+		}
+		return files
+	}
+	for i, img := range p.Images {
+		files = append(files, tgbotapi.FileBytes{Name: fmt.Sprintf("photo%d.jpg", i+1), Bytes: img})
+	}
+	return files
+}
+
+func (h *Handler) sendMedia(msg *tgbotapi.Message, m domain.Media) ([]string, error) {
 	switch {
 	case m.Video != nil:
-		return h.sendVideo(msg, m.Video)
+		id, err := h.sendVideo(msg, m.Video)
+		if err != nil || id == "" {
+			return nil, err
+		}
+		return []string{id}, nil
 	case m.Post != nil:
 		return h.sendPost(msg, m.Post)
 	default:
-		return "", fmt.Errorf("empty media")
+		return nil, fmt.Errorf("empty media")
 	}
 }
 
 func utf16Len(s string) int {
 	return len(utf16.Encode([]rune(s)))
-}
-
-// splitText cuts s into chunks of at most limit UTF-16 units, preferring
-// to break on newlines.
-func splitText(s string, limit int) []string {
-	var chunks []string
-	runes := []rune(s)
-	for len(runes) > 0 {
-		size, cut, lastNewline := 0, 0, -1
-		for cut < len(runes) {
-			w := len(utf16.Encode(runes[cut : cut+1]))
-			if size+w > limit {
-				break
-			}
-			size += w
-			if runes[cut] == '\n' {
-				lastNewline = cut
-			}
-			cut++
-		}
-		if cut < len(runes) && lastNewline > 0 {
-			cut = lastNewline + 1
-		}
-		chunks = append(chunks, string(runes[:cut]))
-		runes = runes[cut:]
-	}
-	return chunks
 }

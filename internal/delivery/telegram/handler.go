@@ -108,7 +108,7 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if text == "" {
 		text = msg.Caption
 	}
-	link, ok := domain.FindInstagramLink(text)
+	link, ok := domain.FindLink(text)
 	if !ok {
 		return
 	}
@@ -137,15 +137,15 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	}()
 }
 
-func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link domain.InstagramLink) {
-	log.Printf("instagram link in chat %d: %s", msg.Chat.ID, link.URL)
+func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link domain.Link) {
+	log.Printf("link in chat %d: %s", msg.Chat.ID, link.URL)
 
 	status := h.sendStatus(msg)
 	defer func() { h.deleteMessage(msg.Chat.ID, status) }()
 
 	media, err := h.media.Fetch(ctx, link)
 	if err != nil {
-		log.Printf("instagram fetch failed: %v", err)
+		log.Printf("fetch failed: %v", err)
 		return
 	}
 	defer media.Release()
@@ -153,22 +153,22 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	h.deleteMessage(msg.Chat.ID, status)
 	status = 0
 
-	fileID, err := h.sendMedia(msg, media)
+	fileIDs, err := h.sendMedia(msg, media)
 	if err != nil && media.Cached {
 		log.Printf("cached send failed, downloading again: %v", err)
 		media, err = h.media.FetchFresh(ctx, link)
 		if err != nil {
-			log.Printf("instagram fetch failed: %v", err)
+			log.Printf("fetch failed: %v", err)
 			return
 		}
 		defer media.Release()
-		fileID, err = h.sendMedia(msg, media)
+		fileIDs, err = h.sendMedia(msg, media)
 	}
 	if err != nil {
 		log.Printf("telegram send failed: %v", err)
 		return
 	}
-	setFileID(&media, fileID)
+	setFileIDs(&media, fileIDs)
 
 	var sender domain.User
 	if msg.From != nil {
@@ -202,12 +202,15 @@ func (h *Handler) allow(msg *tgbotapi.Message) bool {
 	return true
 }
 
-func setFileID(m *domain.Media, fileID string) {
+func setFileIDs(m *domain.Media, fileIDs []string) {
 	switch {
-	case m.Video != nil:
-		m.Video.FileID = fileID
+	case m.Video != nil && len(fileIDs) > 0:
+		m.Video.FileID = fileIDs[0]
 	case m.Post != nil:
-		m.Post.ImageFileID = fileID
+		// A partial album must not be cached as the whole post.
+		if len(fileIDs) == len(m.Post.Images) {
+			m.Post.ImageFileIDs = fileIDs
+		}
 	}
 }
 

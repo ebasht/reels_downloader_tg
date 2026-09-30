@@ -83,21 +83,22 @@ func TestChatRepository(t *testing.T) {
 		{ChatID: chatID, User: sender, URL: "https://www.instagram.com/reel/a/", Shortcode: "a", Type: domain.MediaReel, At: now},
 		{ChatID: chatID, User: sender, URL: "https://www.instagram.com/p/b/", Shortcode: "b", Type: domain.MediaReel, At: now},
 		{ChatID: chatID, URL: "https://www.instagram.com/p/c/", Shortcode: "c", Type: domain.MediaPost, At: now},
+		{ChatID: chatID, URL: "https://auto.drom.ru/x/323106173.html", Shortcode: "323106173", Type: domain.MediaListing, At: now},
 	} {
 		if err := downloads.SaveDownload(ctx, d); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	var reels, posts, rows int
-	if err := pool.QueryRow(ctx, `SELECT reels_downloaded, posts_downloaded FROM chats WHERE id = $1`, chatID).Scan(&reels, &posts); err != nil {
+	var reels, posts, listings, rows int
+	if err := pool.QueryRow(ctx, `SELECT reels_downloaded, posts_downloaded, listings_downloaded FROM chats WHERE id = $1`, chatID).Scan(&reels, &posts, &listings); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM downloads WHERE chat_id = $1`, chatID).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if reels != 2 || posts != 1 || rows != 3 {
-		t.Fatalf("reels=%d posts=%d rows=%d, want 2/1/3", reels, posts, rows)
+	if reels != 2 || posts != 1 || listings != 1 || rows != 4 {
+		t.Fatalf("reels=%d posts=%d listings=%d rows=%d, want 2/1/1/4", reels, posts, listings, rows)
 	}
 
 	const shortcode = "integration-test-shortcode"
@@ -111,6 +112,16 @@ func TestChatRepository(t *testing.T) {
 		cached.Video.FileID != "file-1" || cached.Video.Width != 720 || cached.Video.Height != 1280 || cached.Video.Duration != 59 {
 		t.Fatalf("cached=%+v ok=%v err=%v", cached, ok, err)
 	}
+	album := domain.Media{Post: &domain.Post{ImageFileIDs: []string{"p1", "p2", "p3"}, Caption: "hi"}}
+	if err := downloads.SaveCached(ctx, shortcode, album); err != nil {
+		t.Fatal(err)
+	}
+	cached, ok, err = downloads.FindCached(ctx, shortcode)
+	if err != nil || !ok || cached.Post == nil || cached.Post.Caption != "hi" ||
+		len(cached.Post.ImageFileIDs) != 3 || cached.Post.ImageFileIDs[2] != "p3" {
+		t.Fatalf("cached album=%+v ok=%v err=%v", cached.Post, ok, err)
+	}
+
 	if err := downloads.DeleteCached(ctx, shortcode); err != nil {
 		t.Fatal(err)
 	}

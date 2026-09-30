@@ -19,10 +19,27 @@ func TestFetchPhotoPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(post.Image) == 0 {
-		t.Fatal("empty image")
+	// The post is a carousel of 8 photos.
+	if len(post.Images) != 8 {
+		t.Fatalf("got %d images, want 8", len(post.Images))
 	}
-	t.Logf("image %d bytes, caption:\n%s", len(post.Image), post.Caption)
+	for i, img := range post.Images {
+		if len(img) == 0 {
+			t.Fatalf("image %d is empty", i)
+		}
+	}
+	t.Logf("%d images, caption:\n%s", len(post.Images), post.Caption)
+}
+
+func TestFetchSinglePhotoPost(t *testing.T) {
+	post, err := NewPostFetcher(30*time.Second).FetchPost(context.Background(), "https://www.instagram.com/p/DbiKF46jEF1/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(post.Images) != 1 || len(post.Images[0]) == 0 {
+		t.Fatalf("got %d images, want 1 non-empty", len(post.Images))
+	}
+	t.Logf("image %d bytes, caption: %s", len(post.Images[0]), post.Caption)
 }
 
 func TestFetchPostOnReelReportsVideo(t *testing.T) {

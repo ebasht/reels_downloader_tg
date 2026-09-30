@@ -5,8 +5,9 @@ import "time"
 type MediaType string
 
 const (
-	MediaReel MediaType = "reel"
-	MediaPost MediaType = "post"
+	MediaReel    MediaType = "reel"
+	MediaPost    MediaType = "post"
+	MediaListing MediaType = "listing"
 )
 
 // Type reports what was actually delivered: a video counts as a reel even if
