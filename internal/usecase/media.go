@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"video_download_bot/internal/domain"
@@ -21,6 +22,10 @@ type PostFetcher interface {
 type DownloadRepository interface {
 	// SaveDownload stores the link and increments the chat's counter for its type.
 	SaveDownload(ctx context.Context, d domain.Download) error
+	// FindCached returns media previously sent to Telegram for the shortcode.
+	FindCached(ctx context.Context, shortcode string) (domain.Media, bool, error)
+	SaveCached(ctx context.Context, shortcode string, m domain.Media) error
+	DeleteCached(ctx context.Context, shortcode string) error
 }
 
 type MediaService struct {
@@ -33,24 +38,26 @@ func NewMediaService(reels ReelDownloader, posts PostFetcher, downloads Download
 	return &MediaService{reels: reels, posts: posts, downloads: downloads}
 }
 
-// RecordDelivered saves media that was successfully sent to a chat.
-func (s *MediaService) RecordDelivered(ctx context.Context, chatID int64, user domain.User, link domain.InstagramLink, media domain.Media) error {
-	d := domain.Download{
-		ChatID:    chatID,
-		User:      user,
-		URL:       link.URL,
-		Shortcode: link.Shortcode,
-		Type:      media.Type(),
-		At:        time.Now(),
+// Fetch returns the media behind link, preferring files already sent to
+// Telegram. The caller must call Media.Release.
+func (s *MediaService) Fetch(ctx context.Context, link domain.InstagramLink) (domain.Media, error) {
+	cached, ok, err := s.downloads.FindCached(ctx, link.Shortcode)
+	if err != nil {
+		log.Printf("media cache lookup: %v", err)
 	}
-	if err := s.downloads.SaveDownload(ctx, d); err != nil {
-		return fmt.Errorf("save download %s in chat %d: %w", link.URL, chatID, err)
+	if ok {
+		return cached, nil
 	}
-	return nil
+	return s.FetchFresh(ctx, link)
 }
 
-// Fetch downloads the media behind link. The caller must call Media.Release.
-func (s *MediaService) Fetch(ctx context.Context, link domain.InstagramLink) (domain.Media, error) {
+// FetchFresh downloads the media from Instagram, bypassing and invalidating
+// the cache. Used when a cached Telegram file ID is no longer accepted.
+func (s *MediaService) FetchFresh(ctx context.Context, link domain.InstagramLink) (domain.Media, error) {
+	if err := s.downloads.DeleteCached(ctx, link.Shortcode); err != nil {
+		log.Printf("media cache invalidate: %v", err)
+	}
+
 	switch link.Kind {
 	case domain.LinkReel:
 		return s.fetchVideo(ctx, link.URL)
@@ -74,4 +81,27 @@ func (s *MediaService) fetchVideo(ctx context.Context, url string) (domain.Media
 		return domain.Media{}, fmt.Errorf("download reel %s: %w", url, err)
 	}
 	return domain.Media{Video: video}, nil
+}
+
+// RecordDelivered saves media that was successfully sent to a chat. media must
+// carry the Telegram file ID returned by the send.
+func (s *MediaService) RecordDelivered(ctx context.Context, chatID int64, user domain.User, link domain.InstagramLink, media domain.Media) error {
+	d := domain.Download{
+		ChatID:    chatID,
+		User:      user,
+		URL:       link.URL,
+		Shortcode: link.Shortcode,
+		Type:      media.Type(),
+		At:        time.Now(),
+	}
+	if err := s.downloads.SaveDownload(ctx, d); err != nil {
+		return fmt.Errorf("save download %s in chat %d: %w", link.URL, chatID, err)
+	}
+
+	if !media.Cached && media.FileID() != "" {
+		if err := s.downloads.SaveCached(ctx, link.Shortcode, media); err != nil {
+			return fmt.Errorf("cache media %s: %w", link.Shortcode, err)
+		}
+	}
+	return nil
 }

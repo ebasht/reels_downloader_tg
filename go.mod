@@ -2,6 +2,8 @@ module video_download_bot
 
 go 1.26.3
 
+toolchain go1.26.6
+
 require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/google/uuid v1.6.0

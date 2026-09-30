@@ -10,6 +10,7 @@ import (
 var (
 	ErrMediaNotFound = errors.New("media not found")
 	ErrPostIsVideo   = errors.New("post contains video")
+	ErrVideoTooLong  = errors.New("video is too long")
 )
 
 type LinkKind int
@@ -47,10 +48,12 @@ func FindInstagramLink(text string) (InstagramLink, bool) {
 	}, true
 }
 
-// Video is a downloaded video file ready to be uploaded to Telegram.
+// Video is either a downloaded file (Path) or a file already stored on
+// Telegram servers (FileID).
 type Video struct {
 	Path          string
 	ThumbnailPath string
+	FileID        string
 	Width         int
 	Height        int
 	Duration      int
@@ -58,16 +61,33 @@ type Video struct {
 	Release func()
 }
 
-// Post is the first photo of an Instagram post with its caption.
+// Post is the first photo of an Instagram post with its caption. The photo is
+// either downloaded bytes (Image) or a file on Telegram servers (ImageFileID).
 type Post struct {
-	Image   []byte
-	Caption string
+	Image       []byte
+	ImageFileID string
+	Caption     string
 }
 
 // Media holds exactly one of Video or Post.
 type Media struct {
 	Video *Video
 	Post  *Post
+	// Cached is true when the media was taken from the cache of files already
+	// sent to Telegram rather than downloaded from Instagram.
+	Cached bool
+}
+
+// FileID returns the Telegram file ID of the media, if it has one.
+func (m Media) FileID() string {
+	switch {
+	case m.Video != nil:
+		return m.Video.FileID
+	case m.Post != nil:
+		return m.Post.ImageFileID
+	default:
+		return ""
+	}
 }
 
 func (m Media) Release() {

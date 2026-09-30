@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -50,4 +51,67 @@ func (r *DownloadRepository) SaveDownload(ctx context.Context, d domain.Download
 		}
 		return nil
 	})
+}
+
+func (r *DownloadRepository) FindCached(ctx context.Context, shortcode string) (domain.Media, bool, error) {
+	var (
+		mediaType, fileID, caption string
+		width, height, duration    int
+	)
+	err := r.pool.QueryRow(ctx, `
+		SELECT media_type, file_id, caption, width, height, duration
+		FROM media_cache WHERE shortcode = $1`,
+		shortcode,
+	).Scan(&mediaType, &fileID, &caption, &width, &height, &duration)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Media{}, false, nil
+	}
+	if err != nil {
+		return domain.Media{}, false, fmt.Errorf("find cached media: %w", err)
+	}
+
+	if domain.MediaType(mediaType) == domain.MediaReel {
+		return domain.Media{Cached: true, Video: &domain.Video{
+			FileID: fileID, Width: width, Height: height, Duration: duration,
+		}}, true, nil
+	}
+	return domain.Media{Cached: true, Post: &domain.Post{
+		ImageFileID: fileID, Caption: caption,
+	}}, true, nil
+}
+
+func (r *DownloadRepository) SaveCached(ctx context.Context, shortcode string, m domain.Media) error {
+	var caption string
+	var width, height, duration int
+	if m.Video != nil {
+		width, height, duration = m.Video.Width, m.Video.Height, m.Video.Duration
+	}
+	if m.Post != nil {
+		caption = m.Post.Caption
+	}
+
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO media_cache (shortcode, media_type, file_id, caption, width, height, duration)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (shortcode) DO UPDATE SET
+			media_type = EXCLUDED.media_type,
+			file_id    = EXCLUDED.file_id,
+			caption    = EXCLUDED.caption,
+			width      = EXCLUDED.width,
+			height     = EXCLUDED.height,
+			duration   = EXCLUDED.duration,
+			updated_at = now()`,
+		shortcode, string(m.Type()), m.FileID(), caption, width, height, duration,
+	)
+	if err != nil {
+		return fmt.Errorf("save cached media: %w", err)
+	}
+	return nil
+}
+
+func (r *DownloadRepository) DeleteCached(ctx context.Context, shortcode string) error {
+	if _, err := r.pool.Exec(ctx, `DELETE FROM media_cache WHERE shortcode = $1`, shortcode); err != nil {
+		return fmt.Errorf("delete cached media: %w", err)
+	}
+	return nil
 }

@@ -31,12 +31,13 @@ type videoMeta struct {
 // ReelDownloader downloads reels with yt-dlp and re-encodes them with ffmpeg
 // into a Telegram-friendly mp4 under the bot upload limit.
 type ReelDownloader struct {
-	timeout time.Duration
-	tmpDir  string
+	timeout     time.Duration
+	maxDuration time.Duration
+	tmpDir      string
 }
 
-func NewReelDownloader(timeout time.Duration) *ReelDownloader {
-	return &ReelDownloader{timeout: timeout, tmpDir: os.TempDir()}
+func NewReelDownloader(timeout, maxDuration time.Duration) *ReelDownloader {
+	return &ReelDownloader{timeout: timeout, maxDuration: maxDuration, tmpDir: os.TempDir()}
 }
 
 func (d *ReelDownloader) DownloadReel(ctx context.Context, reelURL string) (*domain.Video, error) {
@@ -48,6 +49,11 @@ func (d *ReelDownloader) DownloadReel(ctx context.Context, reelURL string) (*dom
 		return nil, fmt.Errorf("download: %w", err)
 	}
 	defer os.Remove(videoPath)
+
+	// yt-dlp lets videos with unknown duration through its filter.
+	if raw := probeVideo(ctx, videoPath); time.Duration(raw.Duration)*time.Second > d.maxDuration {
+		return nil, fmt.Errorf("%w: %ds", domain.ErrVideoTooLong, raw.Duration)
+	}
 
 	compatPath, err := d.ensureTelegramCompatible(ctx, videoPath)
 	if err != nil {
@@ -108,7 +114,8 @@ func (d *ReelDownloader) download(ctx context.Context, reelURL string) (string, 
 		"--retries", "3",
 		"--fragment-retries", "3",
 		"--impersonate", "chrome",
-		"-f", "bv*[height<=720]+ba/bv*+ba/b",
+		"--match-filter", fmt.Sprintf("!is_live & duration<=?%d", int(d.maxDuration.Seconds())),
+		"-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
 		"--merge-output-format", "mp4",
 		"-o", outTemplate,
 		reelURL,
@@ -116,12 +123,18 @@ func (d *ReelDownloader) download(ctx context.Context, reelURL string) (string, 
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	cmd.Env = os.Environ()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		d.removeAll(id)
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("download timeout: %w", ctx.Err())
 		}
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	// A filtered video is skipped with exit code 0 and no output file.
+	if strings.Contains(string(out), "does not pass filter") {
+		d.removeAll(id)
+		return "", fmt.Errorf("%w: longer than %s or live", domain.ErrVideoTooLong, d.maxDuration)
 	}
 
 	path, err := d.findDownloadedVideo(id)

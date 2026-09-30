@@ -2,8 +2,10 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -12,22 +14,37 @@ import (
 	"video_download_bot/internal/usecase"
 )
 
-const statusText = "Погоди, скачиваю...."
+const (
+	statusText    = "Погоди, скачиваю...."
+	rateLimitText = "Слишком много ссылок, попробуй чуть позже."
+	busyText      = "Сейчас много загрузок, попробуй чуть позже."
+)
+
+type Limits struct {
+	MaxConcurrent int
+	// MaxQueue caps links waiting for a download slot; extra links are rejected.
+	MaxQueue int
+	PerUser  *usecase.RateLimiter
+	PerChat  *usecase.RateLimiter
+}
 
 type Handler struct {
 	api     *tgbotapi.BotAPI
 	media   *usecase.MediaService
 	members *usecase.MembershipService
+	limits  Limits
 	slots   chan struct{}
+	pending atomic.Int64
 	wg      sync.WaitGroup
 }
 
-func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, maxConcurrent int) *Handler {
+func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, limits Limits) *Handler {
 	return &Handler{
 		api:     api,
 		media:   media,
 		members: members,
-		slots:   make(chan struct{}, maxConcurrent),
+		limits:  limits,
+		slots:   make(chan struct{}, limits.MaxConcurrent),
 	}
 }
 
@@ -96,9 +113,20 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	if !h.allow(msg) {
+		return
+	}
+	if h.pending.Add(1) > int64(h.limits.MaxQueue) {
+		h.pending.Add(-1)
+		log.Printf("queue full, dropping link in chat %d", msg.Chat.ID)
+		h.reply(msg, busyText)
+		return
+	}
+
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
+		defer h.pending.Add(-1)
 		select {
 		case h.slots <- struct{}{}:
 			defer func() { <-h.slots }()
@@ -125,16 +153,22 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	h.deleteMessage(msg.Chat.ID, status)
 	status = 0
 
-	switch {
-	case media.Video != nil:
-		err = h.sendVideo(msg, media.Video)
-	case media.Post != nil:
-		err = h.sendPost(msg, media.Post)
+	fileID, err := h.sendMedia(msg, media)
+	if err != nil && media.Cached {
+		log.Printf("cached send failed, downloading again: %v", err)
+		media, err = h.media.FetchFresh(ctx, link)
+		if err != nil {
+			log.Printf("instagram fetch failed: %v", err)
+			return
+		}
+		defer media.Release()
+		fileID, err = h.sendMedia(msg, media)
 	}
 	if err != nil {
 		log.Printf("telegram send failed: %v", err)
 		return
 	}
+	setFileID(&media, fileID)
 
 	var sender domain.User
 	if msg.From != nil {
@@ -142,6 +176,47 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	}
 	if err := h.media.RecordDelivered(ctx, msg.Chat.ID, sender, link, media); err != nil {
 		log.Printf("record download: %v", err)
+	}
+}
+
+// allow applies per-user and per-chat rate limits, warning once per window.
+func (h *Handler) allow(msg *tgbotapi.Message) bool {
+	keys := []string{fmt.Sprintf("chat:%d", msg.Chat.ID)}
+	limiters := []*usecase.RateLimiter{h.limits.PerChat}
+	if msg.From != nil {
+		keys = append(keys, fmt.Sprintf("user:%d", msg.From.ID))
+		limiters = append(limiters, h.limits.PerUser)
+	}
+
+	for i, l := range limiters {
+		ok, first := l.Allow(keys[i])
+		if ok {
+			continue
+		}
+		log.Printf("rate limited %s", keys[i])
+		if first {
+			h.reply(msg, rateLimitText)
+		}
+		return false
+	}
+	return true
+}
+
+func setFileID(m *domain.Media, fileID string) {
+	switch {
+	case m.Video != nil:
+		m.Video.FileID = fileID
+	case m.Post != nil:
+		m.Post.ImageFileID = fileID
+	}
+}
+
+func (h *Handler) reply(msg *tgbotapi.Message, text string) {
+	cfg := tgbotapi.NewMessage(msg.Chat.ID, text)
+	cfg.ReplyToMessageID = msg.MessageID
+	cfg.AllowSendingWithoutReply = true
+	if _, err := h.api.Send(cfg); err != nil {
+		log.Printf("reply failed: %v", err)
 	}
 }
 

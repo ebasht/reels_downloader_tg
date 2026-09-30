@@ -1,6 +1,9 @@
 package instagram
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
 
 const samplePage = `<html><head>
 <meta property="og:title" content="&#x410;&#x432;&#x442;&#x43e; on Instagram: &quot;&#x41f;&#x440;&#x43e;&#x434;&#x430;&#x435;&#x442;&#x441;&#x44f;
@@ -43,6 +46,28 @@ func TestParseEmbedImageURL(t *testing.T) {
 	}
 	if got := parseEmbedImageURL("<html></html>"); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestIsAllowedURL(t *testing.T) {
+	tests := map[string]bool{
+		"https://www.instagram.com/p/x/":                   true,
+		"https://scontent-ams2-1.cdninstagram.com/v/a.jpg": true,
+		"https://scontent.xx.fbcdn.net/a.jpg":              true,
+		"http://www.instagram.com/p/x/":                    false,
+		"https://evil.com/a.jpg":                           false,
+		"https://instagram.com.evil.com/a.jpg":             false,
+		"https://evilcdninstagram.com/a.jpg":               false,
+		"https://169.254.169.254/latest/meta-data":         false,
+	}
+	for raw, want := range tests {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isAllowedURL(u); got != want {
+			t.Errorf("isAllowedURL(%q) = %v, want %v", raw, got, want)
+		}
 	}
 }
 

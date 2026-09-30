@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"log"
+	"net"
+	"net/url"
 	"os/signal"
 	"syscall"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
@@ -24,6 +25,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	warnInsecureDatabase(cfg.DatabaseURL)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -40,7 +42,7 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	api, err := tgbotapi.NewBotAPI(cfg.BotToken)
+	api, err := telegram.NewBotAPI(cfg.BotToken)
 	if err != nil {
 		log.Fatalf("telegram: %v", err)
 	}
@@ -49,11 +51,35 @@ func main() {
 
 	members := usecase.NewMembershipService(postgres.NewChatRepository(pool))
 	media := usecase.NewMediaService(
-		instagram.NewReelDownloader(cfg.DownloadTimeout),
+		instagram.NewReelDownloader(cfg.DownloadTimeout, cfg.MaxVideoDuration),
 		instagram.NewPostFetcher(cfg.PostFetchTimeout),
 		postgres.NewDownloadRepository(pool),
 	)
 
-	telegram.NewHandler(api, media, members, cfg.MaxConcurrent).Run(ctx)
+	telegram.NewHandler(api, media, members, telegram.Limits{
+		MaxConcurrent: cfg.MaxConcurrent,
+		MaxQueue:      cfg.MaxQueue,
+		PerUser:       usecase.NewRateLimiter(cfg.UserRateLimit, cfg.RateWindow),
+		PerChat:       usecase.NewRateLimiter(cfg.ChatRateLimit, cfg.RateWindow),
+	}).Run(ctx)
 	log.Println("stopped")
+}
+
+func warnInsecureDatabase(databaseURL string) {
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		return
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "postgres" {
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return
+	}
+	switch u.Query().Get("sslmode") {
+	case "require", "verify-ca", "verify-full":
+		return
+	}
+	log.Printf("WARNING: database %s is remote but TLS is not required; set sslmode=verify-full", host)
 }

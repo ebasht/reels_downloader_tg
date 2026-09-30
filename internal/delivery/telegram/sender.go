@@ -1,6 +1,8 @@
 package telegram
 
 import (
+	"encoding/json"
+	"fmt"
 	"unicode/utf16"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -14,7 +16,8 @@ const (
 	maxMessageLen = 4096
 )
 
-func (h *Handler) sendVideo(msg *tgbotapi.Message, v *domain.Video) error {
+// sendVideo sends the video and returns its Telegram file ID.
+func (h *Handler) sendVideo(msg *tgbotapi.Message, v *domain.Video) (string, error) {
 	// VideoConfig in tgbotapi v5 has no Width/Height fields, but Telegram needs them
 	// for correct aspect in the in-app player — send via UploadFiles.
 	params := tgbotapi.Params{}
@@ -26,23 +29,37 @@ func (h *Handler) sendVideo(msg *tgbotapi.Message, v *domain.Video) error {
 	params.AddNonZero("duration", v.Duration)
 	params.AddBool("supports_streaming", true)
 
-	files := []tgbotapi.RequestFile{{
-		Name: "video",
-		Data: tgbotapi.FilePath(v.Path),
-	}}
-	if v.ThumbnailPath != "" {
-		files = append(files, tgbotapi.RequestFile{
-			Name: "thumb",
-			Data: tgbotapi.FilePath(v.ThumbnailPath),
-		})
+	var files []tgbotapi.RequestFile
+	if v.FileID != "" {
+		files = append(files, tgbotapi.RequestFile{Name: "video", Data: tgbotapi.FileID(v.FileID)})
+	} else {
+		files = append(files, tgbotapi.RequestFile{Name: "video", Data: tgbotapi.FilePath(v.Path)})
+		if v.ThumbnailPath != "" {
+			files = append(files, tgbotapi.RequestFile{Name: "thumb", Data: tgbotapi.FilePath(v.ThumbnailPath)})
+		}
 	}
 
-	_, err := h.api.UploadFiles("sendVideo", params, files)
-	return err
+	resp, err := h.api.UploadFiles("sendVideo", params, files)
+	if err != nil {
+		return "", err
+	}
+	var sent tgbotapi.Message
+	if err := json.Unmarshal(resp.Result, &sent); err != nil {
+		return "", fmt.Errorf("decode sendVideo result: %w", err)
+	}
+	if sent.Video == nil {
+		return "", nil
+	}
+	return sent.Video.FileID, nil
 }
 
-func (h *Handler) sendPost(msg *tgbotapi.Message, p *domain.Post) error {
-	photo := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "photo.jpg", Bytes: p.Image})
+// sendPost sends the photo with its caption and returns the photo's Telegram file ID.
+func (h *Handler) sendPost(msg *tgbotapi.Message, p *domain.Post) (string, error) {
+	var file tgbotapi.RequestFileData = tgbotapi.FileBytes{Name: "photo.jpg", Bytes: p.Image}
+	if p.ImageFileID != "" {
+		file = tgbotapi.FileID(p.ImageFileID)
+	}
+	photo := tgbotapi.NewPhoto(msg.Chat.ID, file)
 	photo.ReplyToMessageID = msg.MessageID
 	photo.AllowSendingWithoutReply = true
 
@@ -53,10 +70,14 @@ func (h *Handler) sendPost(msg *tgbotapi.Message, p *domain.Post) error {
 
 	sent, err := h.api.Send(photo)
 	if err != nil {
-		return err
+		return "", err
+	}
+	var fileID string
+	if n := len(sent.Photo); n > 0 {
+		fileID = sent.Photo[n-1].FileID
 	}
 	if fitsCaption {
-		return nil
+		return fileID, nil
 	}
 
 	for _, chunk := range splitText(p.Caption, maxMessageLen) {
@@ -65,10 +86,21 @@ func (h *Handler) sendPost(msg *tgbotapi.Message, p *domain.Post) error {
 		text.AllowSendingWithoutReply = true
 		text.DisableWebPagePreview = true
 		if _, err := h.api.Send(text); err != nil {
-			return err
+			return fileID, err
 		}
 	}
-	return nil
+	return fileID, nil
+}
+
+func (h *Handler) sendMedia(msg *tgbotapi.Message, m domain.Media) (string, error) {
+	switch {
+	case m.Video != nil:
+		return h.sendVideo(msg, m.Video)
+	case m.Post != nil:
+		return h.sendPost(msg, m.Post)
+	default:
+		return "", fmt.Errorf("empty media")
+	}
 }
 
 func utf16Len(s string) int {

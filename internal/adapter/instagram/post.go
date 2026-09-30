@@ -2,11 +2,13 @@ package instagram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -27,7 +29,7 @@ var (
 	// og:description: `1,379 likes, 74 comments - user on September 22, 2026: "caption". `
 	descCaptionRe = regexp.MustCompile(`(?s)^[^"]*?:\s*"(.*)"\.?\s*$`)
 	// og:title: `Name on Instagram: "caption"`
-	titleCaptionRe = regexp.MustCompile(`(?s)on Instagram:\s*"(.*)"\s*$`)
+	titleCaptionRe  = regexp.MustCompile(`(?s)on Instagram:\s*"(.*)"\s*$`)
 	embedImageTagRe = regexp.MustCompile(`<img\b[^>]*\bclass="EmbeddedMediaImage"[^>]*>`)
 	srcAttrRe       = regexp.MustCompile(`\bsrc="([^"]+)"`)
 )
@@ -37,7 +39,33 @@ type PostFetcher struct {
 }
 
 func NewPostFetcher(timeout time.Duration) *PostFetcher {
-	return &PostFetcher{client: &http.Client{Timeout: timeout}}
+	return &PostFetcher{client: &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if !isAllowedURL(req.URL) {
+				return fmt.Errorf("redirect to disallowed host %q", req.URL.Host)
+			}
+			return nil
+		},
+	}}
+}
+
+// isAllowedURL restricts fetches to Instagram and its CDNs: image URLs come
+// from page HTML and must not point the bot at arbitrary hosts.
+func isAllowedURL(u *url.URL) bool {
+	if u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, domain := range []string{"instagram.com", "cdninstagram.com", "fbcdn.net"} {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *PostFetcher) FetchPost(ctx context.Context, postURL string) (*domain.Post, error) {
@@ -76,10 +104,13 @@ func (f *PostFetcher) FetchPost(ctx context.Context, postURL string) (*domain.Po
 	}, nil
 }
 
-func (f *PostFetcher) get(ctx context.Context, url string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (f *PostFetcher) get(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	if !isAllowedURL(req.URL) {
+		return nil, fmt.Errorf("disallowed host %q", req.URL.Host)
 	}
 	req.Header.Set("User-Agent", crawlerUserAgent)
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
