@@ -64,6 +64,43 @@ func TestFindLink(t *testing.T) {
 			ok:   true,
 		},
 		{
+			name: "auto.ru without scheme",
+			text: "auto.ru/cars/used/sale/renault/clio_rs/1133826284-8036e9d5/",
+			want: Link{Kind: LinkListing, Source: SourceAutoRu, ID: "1133826284-8036e9d5", URL: "https://auto.ru/cars/used/sale/renault/clio_rs/1133826284-8036e9d5/"},
+			ok:   true,
+		},
+		{
+			name: "instagram without scheme",
+			text: "вот www.instagram.com/reel/Dd4BAPNsnje/",
+			want: Link{Kind: LinkReel, Source: SourceInstagram, ID: "Dd4BAPNsnje", URL: "https://www.instagram.com/reel/Dd4BAPNsnje/"},
+			ok:   true,
+		},
+		{
+			name: "drom without scheme",
+			text: "auto.drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html",
+			want: Link{Kind: LinkListing, Source: SourceDrom, ID: "323106173", URL: "https://auto.drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html"},
+			ok:   true,
+		},
+		{
+			name: "bare instagram.com post",
+			text: "instagram.com/p/Ddl-FKUDYTH/?img_index=2",
+			want: Link{Kind: LinkPost, Source: SourceInstagram, ID: "Ddl-FKUDYTH", URL: "https://www.instagram.com/p/Ddl-FKUDYTH/"},
+			ok:   true,
+		},
+		{
+			name: "bare avito.ru",
+			text: "avito.ru/lipetsk/avtomobili/skoda_superb_2.0_amt_2017_177_000_km_8318356809",
+			want: Link{Kind: LinkListing, Source: SourceAvito, ID: "8318356809", URL: "https://www.avito.ru/lipetsk/avtomobili/skoda_superb_2.0_amt_2017_177_000_km_8318356809"},
+			ok:   true,
+		},
+		{
+			name: "bare drom.ru",
+			text: "смотри drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html",
+			want: Link{Kind: LinkListing, Source: SourceDrom, ID: "323106173", URL: "https://drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html"},
+			ok:   true,
+		},
+		{name: "other domain ending in auto.ru", text: "https://myauto.ru/cars/used/sale/audi/s4/1133503750-ef26872f/"},
+		{
 			name: "first link wins",
 			text: "https://auto.drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html и https://www.instagram.com/reel/Dd4BAPNsnje/",
 			want: Link{Kind: LinkListing, Source: SourceDrom, ID: "323106173", URL: "https://auto.drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html"},

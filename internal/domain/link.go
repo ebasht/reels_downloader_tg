@@ -39,7 +39,7 @@ type linkPattern struct {
 
 var linkPatterns = []linkPattern{
 	{
-		re: regexp.MustCompile(`(?i)https?://(?:www\.|m\.)?instagram\.com/(?:[A-Za-z0-9_.]+/)?(p|reels?|tv)/([A-Za-z0-9_-]+)`),
+		re: regexp.MustCompile(`(?i)\b(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:[A-Za-z0-9_.]+/)?(p|reels?|tv)/([A-Za-z0-9_-]+)`),
 		parse: func(m []string) Link {
 			kind, path := LinkReel, "reel"
 			if strings.EqualFold(m[1], "p") {
@@ -55,7 +55,7 @@ var linkPatterns = []linkPattern{
 	},
 	{
 		// https://auto.ru/cars/used/sale/audi/s4/1133503750-ef26872f/
-		re: regexp.MustCompile(`(?i)https?://(?:www\.|m\.)?auto\.ru/((?:[a-z0-9_-]+/)+?sale/(?:[a-z0-9_-]+/)*?(\d+-[0-9a-f]+))/?`),
+		re: regexp.MustCompile(`(?i)\b(?:https?://)?(?:www\.|m\.)?auto\.ru/((?:[a-z0-9_-]+/)+?sale/(?:[a-z0-9_-]+/)*?(\d+-[0-9a-f]+))/?`),
 		parse: func(m []string) Link {
 			return Link{
 				Kind:   LinkListing,
@@ -67,7 +67,7 @@ var linkPatterns = []linkPattern{
 	},
 	{
 		// https://www.avito.ru/lipetsk/avtomobili/skoda_superb_2.0_amt_2017_177_000_km_8318356809
-		re: regexp.MustCompile(`(?i)https?://(?:www\.|m\.)?avito\.ru/((?:[a-z0-9_-]+/){2}[a-z0-9_.%-]*?_(\d{6,}))(?:[?#/\s]|$)`),
+		re: regexp.MustCompile(`(?i)\b(?:https?://)?(?:www\.|m\.)?avito\.ru/((?:[a-z0-9_-]+/){2}[a-z0-9_.%-]*?_(\d{6,}))(?:[?#/\s]|$)`),
 		parse: func(m []string) Link {
 			return Link{
 				Kind:   LinkListing,
@@ -79,7 +79,7 @@ var linkPatterns = []linkPattern{
 	},
 	{
 		// https://auto.drom.ru/moscow/mitsubishi/lancer_evolution/323106173.html
-		re: regexp.MustCompile(`(?i)https?://((?:[a-z0-9-]+\.)?drom\.ru)/((?:[a-z0-9_-]+/)*(\d{6,})\.html)`),
+		re: regexp.MustCompile(`(?i)\b(?:https?://)?((?:[a-z0-9-]+\.)?drom\.ru)/((?:[a-z0-9_-]+/)*(\d{6,})\.html)`),
 		parse: func(m []string) Link {
 			return Link{
 				Kind:   LinkListing,
