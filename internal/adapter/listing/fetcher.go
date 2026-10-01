@@ -14,8 +14,8 @@ import (
 const (
 	maxPageBytes  = 5 * 1024 * 1024
 	maxImageBytes = 10 * 1024 * 1024
-	// One Telegram album; listings often have 30+ photos.
-	maxPhotos = 3
+	// Two Telegram albums, same as Instagram carousels; listings often have 30+ photos.
+	maxPhotos = 20
 )
 
 // ad is a listing as parsed from its page, before photos are downloaded.
