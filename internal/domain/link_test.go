@@ -115,6 +115,9 @@ func TestFindLink(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, ok := FindLink(tt.text)
+			if split, _, splitOK := SplitLink(tt.text); split != got || splitOK != ok {
+				t.Fatalf("SplitLink = %+v %v, FindLink = %+v %v", split, splitOK, got, ok)
+			}
 			if ok != tt.ok {
 				t.Fatalf("ok = %v, want %v (got %+v)", ok, tt.ok, got)
 			}
@@ -122,5 +125,19 @@ func TestFindLink(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSplitLinkComment(t *testing.T) {
+	tests := []struct{ text, want string }{
+		{"https://www.instagram.com/reel/Dd4BAPNsnje/", ""},
+		{"смотри https://www.avito.ru/lipetsk/avtomobili/skoda_superb_2017_8318356809?utm_source=soc_sharing", "смотри"},
+		{"зацени  auto.ru/cars/used/sale/audi/s4/1133503750-ef26872f/?from=share \n недорого", "зацени недорого"},
+	}
+	for _, tt := range tests {
+		_, got, ok := SplitLink(tt.text)
+		if !ok || got != tt.want {
+			t.Errorf("SplitLink(%q) comment = %q, want %q", tt.text, got, tt.want)
+		}
 	}
 }

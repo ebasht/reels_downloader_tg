@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 type LinkKind int
@@ -93,7 +94,29 @@ var linkPatterns = []linkPattern{
 
 // FindLink returns the first supported link in text.
 func FindLink(text string) (Link, bool) {
-	best, bestPos := Link{}, -1
+	link, _, _, ok := findLink(text)
+	return link, ok
+}
+
+// SplitLink returns the first supported link in text and the rest of the
+// text with the whole URL token removed.
+func SplitLink(text string) (Link, string, bool) {
+	link, start, end, ok := findLink(text)
+	if !ok {
+		return Link{}, "", false
+	}
+	// The pattern may stop before a query string; drop the token up to whitespace.
+	if i := strings.IndexFunc(text[end:], unicode.IsSpace); i >= 0 {
+		end += i
+	} else {
+		end = len(text)
+	}
+	comment := strings.Join(strings.Fields(text[:start]+" "+text[end:]), " ")
+	return link, comment, true
+}
+
+func findLink(text string) (Link, int, int, bool) {
+	best, bestPos, bestEnd := Link{}, -1, -1
 	for _, p := range linkPatterns {
 		loc := p.re.FindStringSubmatchIndex(text)
 		if loc == nil || (bestPos >= 0 && loc[0] >= bestPos) {
@@ -105,7 +128,23 @@ func FindLink(text string) (Link, bool) {
 				m[i] = text[loc[2*i]:loc[2*i+1]]
 			}
 		}
-		best, bestPos = p.parse(m), loc[0]
+		best, bestPos, bestEnd = p.parse(m), loc[0], loc[1]
 	}
-	return best, bestPos >= 0
+	return best, bestPos, bestEnd, bestPos >= 0
+}
+
+// Name is the site name shown to users.
+func (s Source) Name() string {
+	switch s {
+	case SourceInstagram:
+		return "Instagram"
+	case SourceAutoRu:
+		return "auto.ru"
+	case SourceAvito:
+		return "Авито"
+	case SourceDrom:
+		return "Дром"
+	default:
+		return string(s)
+	}
 }

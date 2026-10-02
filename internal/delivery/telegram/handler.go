@@ -36,7 +36,16 @@ type Handler struct {
 	slots   chan struct{}
 	pending atomic.Int64
 	wg      sync.WaitGroup
+	// rights caches whether the bot may delete messages, by chat ID.
+	rights sync.Map
 }
+
+type deleteRight struct {
+	allowed bool
+	at      time.Time
+}
+
+const rightsTTL = 5 * time.Minute
 
 func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, limits Limits) *Handler {
 	return &Handler{
@@ -90,6 +99,7 @@ func (h *Handler) handleMyChatMember(ctx context.Context, u *tgbotapi.ChatMember
 	}
 	log.Printf("bot membership in chat %d (%s): %s -> %s by user %d",
 		change.Chat.ID, change.Chat.Title, change.OldStatus, change.NewStatus, change.Actor.ID)
+	h.rights.Delete(u.Chat.ID)
 
 	if err := h.members.HandleBotMembership(ctx, change); err != nil {
 		log.Printf("membership: %v", err)
@@ -108,7 +118,7 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if text == "" {
 		text = msg.Caption
 	}
-	link, ok := domain.FindLink(text)
+	link, comment, ok := domain.SplitLink(text)
 	if !ok {
 		return
 	}
@@ -133,12 +143,19 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		case <-ctx.Done():
 			return
 		}
-		h.processLink(ctx, msg, link)
+		h.processLink(ctx, msg, link, comment)
 	}()
 }
 
-func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link domain.Link) {
+func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link domain.Link, comment string) {
 	log.Printf("link in chat %d: %s", msg.Chat.ID, link.URL)
+
+	// The original is deleted after delivery, so the answer must not reply to it.
+	deleteOriginal := h.canDelete(msg.Chat)
+	d := delivery{chatID: msg.Chat.ID, header: newHeader(link, msg.From, comment)}
+	if !deleteOriginal {
+		d.replyTo = msg.MessageID
+	}
 
 	status := h.sendStatus(msg)
 	defer func() { h.deleteMessage(msg.Chat.ID, status) }()
@@ -153,7 +170,7 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	h.deleteMessage(msg.Chat.ID, status)
 	status = 0
 
-	fileIDs, err := h.sendMedia(msg, media)
+	fileIDs, err := h.sendMedia(d, media)
 	if err != nil && media.Cached {
 		log.Printf("cached send failed, downloading again: %v", err)
 		media, err = h.media.FetchFresh(ctx, link)
@@ -162,11 +179,14 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 			return
 		}
 		defer media.Release()
-		fileIDs, err = h.sendMedia(msg, media)
+		fileIDs, err = h.sendMedia(d, media)
 	}
 	if err != nil {
 		log.Printf("telegram send failed: %v", err)
 		return
+	}
+	if deleteOriginal {
+		h.deleteMessage(msg.Chat.ID, msg.MessageID)
 	}
 	setFileIDs(&media, fileIDs)
 
@@ -233,6 +253,30 @@ func (h *Handler) sendStatus(msg *tgbotapi.Message) int {
 		return 0
 	}
 	return sent.MessageID
+}
+
+// canDelete reports whether the bot may delete other members' messages in
+// the group. Private chats keep the user's message.
+func (h *Handler) canDelete(chat *tgbotapi.Chat) bool {
+	if chat == nil || !(chat.IsGroup() || chat.IsSuperGroup()) {
+		return false
+	}
+	if v, ok := h.rights.Load(chat.ID); ok {
+		if r := v.(deleteRight); time.Since(r.at) < rightsTTL {
+			return r.allowed
+		}
+	}
+
+	member, err := h.api.GetChatMember(tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{ChatID: chat.ID, UserID: h.api.Self.ID},
+	})
+	if err != nil {
+		log.Printf("get bot rights in chat %d: %v", chat.ID, err)
+		return false
+	}
+	allowed := member.Status == "creator" || (member.Status == "administrator" && member.CanDeleteMessages)
+	h.rights.Store(chat.ID, deleteRight{allowed: allowed, at: time.Now()})
+	return allowed
 }
 
 func (h *Handler) deleteMessage(chatID int64, messageID int) {
