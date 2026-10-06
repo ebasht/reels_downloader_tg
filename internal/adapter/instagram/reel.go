@@ -111,6 +111,7 @@ func (d *ReelDownloader) download(ctx context.Context, reelURL string) (string, 
 	args := []string{
 		"--no-playlist",
 		"--no-warnings",
+		"--no-cache-dir",
 		"--retries", "3",
 		"--fragment-retries", "3",
 		"--impersonate", "chrome",

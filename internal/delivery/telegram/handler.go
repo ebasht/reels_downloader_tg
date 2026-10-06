@@ -170,17 +170,8 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	h.deleteMessage(msg.Chat.ID, status)
 	status = 0
 
-	fileIDs, err := h.sendMedia(d, media)
-	if err != nil && media.Cached {
-		log.Printf("cached send failed, downloading again: %v", err)
-		media, err = h.media.FetchFresh(ctx, link)
-		if err != nil {
-			log.Printf("fetch failed: %v", err)
-			return
-		}
-		defer media.Release()
-		fileIDs, err = h.sendMedia(d, media)
-	}
+	err = h.sendMedia(d, media)
+	media.Release()
 	if err != nil {
 		log.Printf("telegram send failed: %v", err)
 		return
@@ -188,13 +179,12 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	if deleteOriginal {
 		h.deleteMessage(msg.Chat.ID, msg.MessageID)
 	}
-	setFileIDs(&media, fileIDs)
 
 	var sender domain.User
 	if msg.From != nil {
 		sender = toDomainUser(*msg.From)
 	}
-	if err := h.media.RecordDelivered(ctx, msg.Chat.ID, sender, link, media); err != nil {
+	if err := h.media.RecordDelivered(ctx, msg.Chat.ID, sender, link, media.Type()); err != nil {
 		log.Printf("record download: %v", err)
 	}
 }
@@ -220,18 +210,6 @@ func (h *Handler) allow(msg *tgbotapi.Message) bool {
 		return false
 	}
 	return true
-}
-
-func setFileIDs(m *domain.Media, fileIDs []string) {
-	switch {
-	case m.Video != nil && len(fileIDs) > 0:
-		m.Video.FileID = fileIDs[0]
-	case m.Post != nil:
-		// A partial album must not be cached as the whole post.
-		if len(fileIDs) == len(m.Post.Images) {
-			m.Post.ImageFileIDs = fileIDs
-		}
-	}
 }
 
 func (h *Handler) reply(msg *tgbotapi.Message, text string) {

@@ -8,12 +8,10 @@ var (
 	ErrVideoTooLong  = errors.New("video is too long")
 )
 
-// Video is either a downloaded file (Path) or a file already stored on
-// Telegram servers (FileID).
+// Video is a downloaded file ready to send.
 type Video struct {
 	Path          string
 	ThumbnailPath string
-	FileID        string
 	Width         int
 	Height        int
 	Duration      int
@@ -21,38 +19,34 @@ type Video struct {
 	Release func()
 }
 
-// Post holds photos with a caption: an Instagram post (all photos of a
-// carousel) or a car listing with its ad text. Photos are either downloaded
-// bytes (Images) or files on Telegram servers (ImageFileIDs).
+// Post holds photos and videos with a caption: an Instagram post (all items
+// of a carousel) or a car listing with its ad text.
 type Post struct {
-	Images       [][]byte
-	ImageFileIDs []string
-	Caption      string
+	Items   []PostItem
+	Caption string
+}
+
+// PostItem is a downloaded photo or video.
+type PostItem struct {
+	Data    []byte
+	IsVideo bool
+	// Width and Height are set for videos when known.
+	Width  int
+	Height int
 }
 
 // Media holds exactly one of Video or Post.
 type Media struct {
 	Video *Video
 	Post  *Post
-	// Cached is true when the media was taken from the cache of files already
-	// sent to Telegram rather than downloaded from Instagram.
-	Cached bool
 }
 
-// FileIDs returns the Telegram file IDs of the media, if it has them.
-func (m Media) FileIDs() []string {
-	switch {
-	case m.Video != nil && m.Video.FileID != "":
-		return []string{m.Video.FileID}
-	case m.Post != nil:
-		return m.Post.ImageFileIDs
-	default:
-		return nil
-	}
-}
-
+// Release frees the downloaded files and data. Safe to call multiple times.
 func (m Media) Release() {
 	if m.Video != nil && m.Video.Release != nil {
 		m.Video.Release()
+	}
+	if m.Post != nil {
+		m.Post.Items = nil
 	}
 }

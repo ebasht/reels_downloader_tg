@@ -2,6 +2,7 @@ package instagram
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -49,11 +50,13 @@ func TestParseEmbedImageURL(t *testing.T) {
 	}
 }
 
-func TestParseCarouselImageURLs(t *testing.T) {
+func TestParseCarouselItems(t *testing.T) {
 	doc := `{"context":{"type":"GraphSidecar"},"gql_data":{"shortcode_media":{"__typename":"GraphSidecar",` +
 		`"edge_sidecar_to_children":{"edges":[` +
 		`{"node":{"is_video":false,"display_url":"https://scontent.cdninstagram.com/1.jpg?a=1\u0026b=2"}},` +
-		`{"node":{"is_video":true,"display_url":"https://scontent.cdninstagram.com/video-cover.jpg"}},` +
+		`{"node":{"is_video":true,"display_url":"https://scontent.cdninstagram.com/cover.jpg",` +
+		`"video_url":"https://scontent.cdninstagram.com/v.mp4","dimensions":{"width":720,"height":960}}},` +
+		`{"node":{"is_video":true,"display_url":"https://scontent.cdninstagram.com/no-video.jpg"}},` +
 		`{"node":{"is_video":false,"display_url":"https://scontent.cdninstagram.com/2.jpg"}}]}}}}`
 	encoded, err := json.Marshal(doc)
 	if err != nil {
@@ -61,15 +64,19 @@ func TestParseCarouselImageURLs(t *testing.T) {
 	}
 	page := `<script>{"isSidecar":true,"contextJSON":` + string(encoded) + `,"other":1}</script>`
 
-	got := parseCarouselImageURLs(page)
-	want := []string{"https://scontent.cdninstagram.com/1.jpg?a=1&b=2", "https://scontent.cdninstagram.com/2.jpg"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("got %q, want %q", got, want)
+	got := parseCarouselItems(page)
+	want := []embedItem{
+		{url: "https://scontent.cdninstagram.com/1.jpg?a=1&b=2"},
+		{url: "https://scontent.cdninstagram.com/v.mp4", isVideo: true, width: 720, height: 960},
+		{url: "https://scontent.cdninstagram.com/2.jpg"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 
 	single := `{"contextJSON":"{\"context\":{\"type\":\"GraphImage\"},\"gql_data\":null}"}`
-	if got := parseCarouselImageURLs(single); got != nil {
-		t.Fatalf("single post: got %q, want nil", got)
+	if got := parseCarouselItems(single); got != nil {
+		t.Fatalf("single post: got %+v, want nil", got)
 	}
 }
 

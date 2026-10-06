@@ -17,7 +17,9 @@ import (
 const (
 	maxPageBytes  = 5 * 1024 * 1024
 	maxImageBytes = 10 * 1024 * 1024
-	maxPostImages = 20 // Instagram's carousel limit
+	// maxPostBytes bounds memory held by one carousel.
+	maxPostBytes = 150 * 1024 * 1024
+	maxPostItems = 20 // Instagram's carousel limit
 )
 
 var (
@@ -57,26 +59,35 @@ func (f *PostFetcher) FetchPost(ctx context.Context, postURL string) (*domain.Po
 	}
 
 	// og:image is a 640x640 square crop of the first photo; the embed page has
-	// all carousel photos uncropped.
-	var images [][]byte
-	for _, u := range f.embedImageURLs(ctx, postURL) {
-		img, err := f.get(ctx, u, maxImageBytes)
+	// all carousel items uncropped.
+	var items []domain.PostItem
+	var total int
+	for _, it := range f.embedItems(ctx, postURL) {
+		limit := int64(maxImageBytes)
+		if it.isVideo {
+			limit = maxVideoBytes
+		}
+		data, err := f.get(ctx, it.url, limit)
 		if err != nil {
-			log.Printf("instagram full-size image failed: %v", err)
+			log.Printf("instagram carousel item failed: %v", err)
 			continue
 		}
-		images = append(images, img)
+		if total += len(data); total > maxPostBytes {
+			log.Printf("instagram post exceeds %d bytes, dropping the rest", maxPostBytes)
+			break
+		}
+		items = append(items, domain.PostItem{Data: data, IsVideo: it.isVideo, Width: it.width, Height: it.height})
 	}
-	if len(images) == 0 {
+	if len(items) == 0 {
 		img, err := f.get(ctx, imageURL, maxImageBytes)
 		if err != nil {
 			return nil, fmt.Errorf("load image: %w", err)
 		}
-		images = [][]byte{img}
+		items = []domain.PostItem{{Data: img}}
 	}
 
 	return &domain.Post{
-		Images:  images,
+		Items:   items,
 		Caption: extractCaption(tags),
 	}, nil
 }
@@ -89,25 +100,32 @@ func (f *PostFetcher) get(ctx context.Context, rawURL string, limit int64) ([]by
 	return resp.Body, nil
 }
 
-func (f *PostFetcher) embedImageURLs(ctx context.Context, postURL string) []string {
+// embedItem is a carousel photo or video as listed on the embed page.
+type embedItem struct {
+	url           string
+	isVideo       bool
+	width, height int
+}
+
+func (f *PostFetcher) embedItems(ctx context.Context, postURL string) []embedItem {
 	page, err := f.get(ctx, strings.TrimSuffix(postURL, "/")+"/embed/captioned/", maxPageBytes)
 	if err != nil {
 		log.Printf("instagram embed page failed: %v", err)
 		return nil
 	}
-	if urls := parseCarouselImageURLs(string(page)); len(urls) > 0 {
-		return urls
+	if items := parseCarouselItems(string(page)); len(items) > 0 {
+		return items
 	}
 	if u := parseEmbedImageURL(string(page)); u != "" {
-		return []string{u}
+		return []embedItem{{url: u}}
 	}
 	return nil
 }
 
-// parseCarouselImageURLs extracts carousel photos from the embed page's
-// contextJSON, a JSON document stored as a JSON string. Video items are
-// skipped. Returns nil for single-photo posts, which have no carousel data.
-func parseCarouselImageURLs(page string) []string {
+// parseCarouselItems extracts carousel photos and videos, in order, from the
+// embed page's contextJSON, a JSON document stored as a JSON string. Returns
+// nil for single-photo posts, which have no carousel data.
+func parseCarouselItems(page string) []embedItem {
 	m := contextJSONRe.FindStringSubmatch(page)
 	if m == nil {
 		return nil
@@ -124,6 +142,11 @@ func parseCarouselImageURLs(page string) []string {
 						Node struct {
 							IsVideo    bool   `json:"is_video"`
 							DisplayURL string `json:"display_url"`
+							VideoURL   string `json:"video_url"`
+							Dimensions struct {
+								Width  int `json:"width"`
+								Height int `json:"height"`
+							} `json:"dimensions"`
 						} `json:"node"`
 					} `json:"edges"`
 				} `json:"edge_sidecar_to_children"`
@@ -137,17 +160,22 @@ func parseCarouselImageURLs(page string) []string {
 		return nil
 	}
 
-	var urls []string
+	var items []embedItem
 	for _, e := range doc.GQLData.ShortcodeMedia.Sidecar.Edges {
-		if e.Node.IsVideo || e.Node.DisplayURL == "" {
+		n := e.Node
+		item := embedItem{url: n.DisplayURL}
+		if n.IsVideo {
+			item = embedItem{url: n.VideoURL, isVideo: true, width: n.Dimensions.Width, height: n.Dimensions.Height}
+		}
+		if item.url == "" {
 			continue
 		}
-		urls = append(urls, e.Node.DisplayURL)
-		if len(urls) == maxPostImages {
+		items = append(items, item)
+		if len(items) == maxPostItems {
 			break
 		}
 	}
-	return urls
+	return items
 }
 
 func parseEmbedImageURL(page string) string {

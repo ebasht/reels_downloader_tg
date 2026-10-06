@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"encoding/json"
 	"fmt"
 	"html"
 	"strconv"
@@ -67,8 +66,7 @@ func displayName(u *tgbotapi.User) string {
 	return "пользователь"
 }
 
-// sendVideo sends the video and returns its Telegram file ID.
-func (h *Handler) sendVideo(d delivery, v *domain.Video) (string, error) {
+func (h *Handler) sendVideo(d delivery, v *domain.Video) error {
 	// VideoConfig in tgbotapi v5 has no Width/Height fields, but Telegram needs them
 	// for correct aspect in the in-app player — send via UploadFiles.
 	params := tgbotapi.Params{}
@@ -82,59 +80,33 @@ func (h *Handler) sendVideo(d delivery, v *domain.Video) (string, error) {
 	params.AddNonZero("duration", v.Duration)
 	params.AddBool("supports_streaming", true)
 
-	var files []tgbotapi.RequestFile
-	if v.FileID != "" {
-		files = append(files, tgbotapi.RequestFile{Name: "video", Data: tgbotapi.FileID(v.FileID)})
-	} else {
-		files = append(files, tgbotapi.RequestFile{Name: "video", Data: tgbotapi.FilePath(v.Path)})
-		if v.ThumbnailPath != "" {
-			files = append(files, tgbotapi.RequestFile{Name: "thumb", Data: tgbotapi.FilePath(v.ThumbnailPath)})
-		}
+	files := []tgbotapi.RequestFile{{Name: "video", Data: tgbotapi.FilePath(v.Path)}}
+	if v.ThumbnailPath != "" {
+		files = append(files, tgbotapi.RequestFile{Name: "thumb", Data: tgbotapi.FilePath(v.ThumbnailPath)})
 	}
-
-	resp, err := h.api.UploadFiles("sendVideo", params, files)
-	if err != nil {
-		return "", err
-	}
-	var sent tgbotapi.Message
-	if err := json.Unmarshal(resp.Result, &sent); err != nil {
-		return "", fmt.Errorf("decode sendVideo result: %w", err)
-	}
-	if sent.Video == nil {
-		return "", nil
-	}
-	return sent.Video.FileID, nil
+	_, err := h.api.UploadFiles("sendVideo", params, files)
+	return err
 }
 
-// sendPost sends the post's photos as one message (an album for carousels)
-// with the caption and returns the photos' Telegram file IDs in order.
-func (h *Handler) sendPost(d delivery, p *domain.Post) ([]string, error) {
-	files := postFiles(p)
-	if len(files) == 0 {
-		return nil, fmt.Errorf("post has no photos")
+// sendPost sends the post's photos and videos as one message (an album for
+// carousels) with the caption.
+func (h *Handler) sendPost(d delivery, p *domain.Post) error {
+	if len(p.Items) == 0 {
+		return fmt.Errorf("post has no photos")
 	}
 
 	caption := captionHTML(d.header, p.Caption)
-
-	var fileIDs []string
-	for start := 0; start < len(files); start += maxAlbumSize {
-		chunk := files[start:min(start+maxAlbumSize, len(files))]
+	for start := 0; start < len(p.Items); start += maxAlbumSize {
+		chunk := p.Items[start:min(start+maxAlbumSize, len(p.Items))]
 		chunkCaption := ""
 		if start == 0 {
 			chunkCaption = caption
 		}
-
-		sent, err := h.sendPhotos(d, chunk, chunkCaption)
-		if err != nil {
-			return fileIDs, err
-		}
-		for _, m := range sent {
-			if n := len(m.Photo); n > 0 {
-				fileIDs = append(fileIDs, m.Photo[n-1].FileID)
-			}
+		if err := h.sendItems(d, chunk, start, chunkCaption); err != nil {
+			return err
 		}
 	}
-	return fileIDs, nil
+	return nil
 }
 
 // captionHTML renders the header followed by the content as Telegram HTML,
@@ -195,61 +167,73 @@ func truncateText(s string, limit int) string {
 	return strings.TrimRight(string(runes[:cut]), " \n\t,.;:") + "…"
 }
 
-// sendPhotos sends up to maxAlbumSize photos; albums need at least two.
-func (h *Handler) sendPhotos(d delivery, files []tgbotapi.RequestFileData, caption string) ([]tgbotapi.Message, error) {
-	if len(files) == 1 {
-		photo := tgbotapi.NewPhoto(d.chatID, files[0])
-		photo.ReplyToMessageID = d.replyTo
-		photo.AllowSendingWithoutReply = true
-		photo.Caption = caption
-		photo.ParseMode = tgbotapi.ModeHTML
-		sent, err := h.api.Send(photo)
-		if err != nil {
-			return nil, err
+// sendItems sends up to maxAlbumSize photos and videos; albums need at least
+// two items. offset numbers the uploaded files across chunks.
+func (h *Handler) sendItems(d delivery, items []domain.PostItem, offset int, caption string) error {
+	if len(items) == 1 {
+		var cfg tgbotapi.Chattable
+		file := itemFile(items[0], offset)
+		if items[0].IsVideo {
+			video := tgbotapi.NewVideo(d.chatID, file)
+			video.ReplyToMessageID = d.replyTo
+			video.AllowSendingWithoutReply = true
+			video.Caption = caption
+			video.ParseMode = tgbotapi.ModeHTML
+			video.SupportsStreaming = true
+			cfg = video
+		} else {
+			photo := tgbotapi.NewPhoto(d.chatID, file)
+			photo.ReplyToMessageID = d.replyTo
+			photo.AllowSendingWithoutReply = true
+			photo.Caption = caption
+			photo.ParseMode = tgbotapi.ModeHTML
+			cfg = photo
 		}
-		return []tgbotapi.Message{sent}, nil
+		_, err := h.api.Send(cfg)
+		return err
 	}
 
-	items := make([]interface{}, len(files))
-	for i, f := range files {
-		item := tgbotapi.NewInputMediaPhoto(f)
+	media := make([]interface{}, len(items))
+	for i, it := range items {
+		file := itemFile(it, offset+i)
+		itemCaption := ""
 		if i == 0 {
-			item.Caption = caption
-			item.ParseMode = tgbotapi.ModeHTML
+			itemCaption = caption
 		}
-		items[i] = item
+		if it.IsVideo {
+			v := tgbotapi.NewInputMediaVideo(file)
+			v.Caption, v.ParseMode = itemCaption, tgbotapi.ModeHTML
+			v.Width, v.Height = it.Width, it.Height
+			v.SupportsStreaming = true
+			media[i] = v
+		} else {
+			p := tgbotapi.NewInputMediaPhoto(file)
+			p.Caption, p.ParseMode = itemCaption, tgbotapi.ModeHTML
+			media[i] = p
+		}
 	}
-	album := tgbotapi.NewMediaGroup(d.chatID, items)
+	album := tgbotapi.NewMediaGroup(d.chatID, media)
 	album.ReplyToMessageID = d.replyTo
-	return h.api.SendMediaGroup(album)
+	_, err := h.api.SendMediaGroup(album)
+	return err
 }
 
-func postFiles(p *domain.Post) []tgbotapi.RequestFileData {
-	var files []tgbotapi.RequestFileData
-	if len(p.ImageFileIDs) > 0 {
-		for _, id := range p.ImageFileIDs {
-			files = append(files, tgbotapi.FileID(id))
-		}
-		return files
+func itemFile(it domain.PostItem, index int) tgbotapi.RequestFileData {
+	ext := "jpg"
+	if it.IsVideo {
+		ext = "mp4"
 	}
-	for i, img := range p.Images {
-		files = append(files, tgbotapi.FileBytes{Name: fmt.Sprintf("photo%d.jpg", i+1), Bytes: img})
-	}
-	return files
+	return tgbotapi.FileBytes{Name: fmt.Sprintf("item%d.%s", index+1, ext), Bytes: it.Data}
 }
 
-func (h *Handler) sendMedia(d delivery, m domain.Media) ([]string, error) {
+func (h *Handler) sendMedia(d delivery, m domain.Media) error {
 	switch {
 	case m.Video != nil:
-		id, err := h.sendVideo(d, m.Video)
-		if err != nil || id == "" {
-			return nil, err
-		}
-		return []string{id}, nil
+		return h.sendVideo(d, m.Video)
 	case m.Post != nil:
 		return h.sendPost(d, m.Post)
 	default:
-		return nil, fmt.Errorf("empty media")
+		return fmt.Errorf("empty media")
 	}
 }
 

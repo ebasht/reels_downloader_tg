@@ -100,32 +100,4 @@ func TestChatRepository(t *testing.T) {
 	if reels != 2 || posts != 1 || listings != 1 || rows != 4 {
 		t.Fatalf("reels=%d posts=%d listings=%d rows=%d, want 2/1/1/4", reels, posts, listings, rows)
 	}
-
-	const shortcode = "integration-test-shortcode"
-	t.Cleanup(func() { _ = downloads.DeleteCached(ctx, shortcode) })
-	video := domain.Media{Video: &domain.Video{FileID: "file-1", Width: 720, Height: 1280, Duration: 59}}
-	if err := downloads.SaveCached(ctx, shortcode, video); err != nil {
-		t.Fatal(err)
-	}
-	cached, ok, err := downloads.FindCached(ctx, shortcode)
-	if err != nil || !ok || !cached.Cached || cached.Video == nil ||
-		cached.Video.FileID != "file-1" || cached.Video.Width != 720 || cached.Video.Height != 1280 || cached.Video.Duration != 59 {
-		t.Fatalf("cached=%+v ok=%v err=%v", cached, ok, err)
-	}
-	album := domain.Media{Post: &domain.Post{ImageFileIDs: []string{"p1", "p2", "p3"}, Caption: "hi"}}
-	if err := downloads.SaveCached(ctx, shortcode, album); err != nil {
-		t.Fatal(err)
-	}
-	cached, ok, err = downloads.FindCached(ctx, shortcode)
-	if err != nil || !ok || cached.Post == nil || cached.Post.Caption != "hi" ||
-		len(cached.Post.ImageFileIDs) != 3 || cached.Post.ImageFileIDs[2] != "p3" {
-		t.Fatalf("cached album=%+v ok=%v err=%v", cached.Post, ok, err)
-	}
-
-	if err := downloads.DeleteCached(ctx, shortcode); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, _ := downloads.FindCached(ctx, shortcode); ok {
-		t.Fatal("cache entry not deleted")
-	}
 }

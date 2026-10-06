@@ -20,15 +20,31 @@ func TestFetchPhotoPost(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The post is a carousel of 8 photos.
-	if len(post.Images) != 8 {
-		t.Fatalf("got %d images, want 8", len(post.Images))
+	if len(post.Items) != 8 {
+		t.Fatalf("got %d items, want 8", len(post.Items))
 	}
-	for i, img := range post.Images {
-		if len(img) == 0 {
-			t.Fatalf("image %d is empty", i)
+	for i, it := range post.Items {
+		if len(it.Data) == 0 || it.IsVideo {
+			t.Fatalf("item %d: %d bytes, video=%v", i, len(it.Data), it.IsVideo)
 		}
 	}
-	t.Logf("%d images, caption:\n%s", len(post.Images), post.Caption)
+	t.Logf("%d items, caption:\n%s", len(post.Items), post.Caption)
+}
+
+func TestFetchMixedCarousel(t *testing.T) {
+	post, err := NewPostFetcher(60*time.Second).FetchPost(context.Background(), "https://www.instagram.com/p/DeFANL2kST5/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 20 items: a photo, three videos, then photos.
+	if len(post.Items) != 20 {
+		t.Fatalf("got %d items, want 20", len(post.Items))
+	}
+	for i, it := range post.Items {
+		if wantVideo := i >= 1 && i <= 3; it.IsVideo != wantVideo || len(it.Data) == 0 {
+			t.Fatalf("item %d: %d bytes, video=%v, want video=%v", i, len(it.Data), it.IsVideo, wantVideo)
+		}
+	}
 }
 
 func TestFetchSinglePhotoPost(t *testing.T) {
@@ -36,10 +52,10 @@ func TestFetchSinglePhotoPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(post.Images) != 1 || len(post.Images[0]) == 0 {
-		t.Fatalf("got %d images, want 1 non-empty", len(post.Images))
+	if len(post.Items) != 1 || len(post.Items[0].Data) == 0 {
+		t.Fatalf("got %d items, want 1 non-empty", len(post.Items))
 	}
-	t.Logf("image %d bytes, caption: %s", len(post.Images[0]), post.Caption)
+	t.Logf("image %d bytes, caption: %s", len(post.Items[0].Data), post.Caption)
 }
 
 func TestFetchPostOnReelReportsVideo(t *testing.T) {
