@@ -36,9 +36,9 @@ func TestFetchMixedCarousel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 20 items: a photo, three videos, then photos.
-	if len(post.Items) != 20 {
-		t.Fatalf("got %d items, want 20", len(post.Items))
+	// Source has 20 items; we keep one Telegram album (photo, three videos, then photos).
+	if len(post.Items) != 10 {
+		t.Fatalf("got %d items, want 10", len(post.Items))
 	}
 	for i, it := range post.Items {
 		if wantVideo := i >= 1 && i <= 3; it.IsVideo != wantVideo || len(it.Data) == 0 {

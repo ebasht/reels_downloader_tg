@@ -19,7 +19,7 @@ const (
 	maxImageBytes = 10 * 1024 * 1024
 	// maxPostBytes bounds memory held by one carousel.
 	maxPostBytes = 150 * 1024 * 1024
-	maxPostItems = 20 // Instagram's carousel limit
+	maxPostItems = 10 // one Telegram album
 )
 
 var (
