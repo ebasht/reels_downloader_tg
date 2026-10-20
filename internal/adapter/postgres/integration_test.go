@@ -100,4 +100,31 @@ func TestChatRepository(t *testing.T) {
 	if reels != 2 || posts != 1 || listings != 1 || rows != 4 {
 		t.Fatalf("reels=%d posts=%d listings=%d rows=%d, want 2/1/1/4", reels, posts, listings, rows)
 	}
+
+	msgs := NewMessageRepository(pool)
+	past := now.Add(-time.Minute)
+	future := now.Add(time.Hour)
+	if err := msgs.Schedule(ctx, chatID, []int{10, 11}, past); err != nil {
+		t.Fatal(err)
+	}
+	if err := msgs.Schedule(ctx, chatID, []int{12}, future); err != nil {
+		t.Fatal(err)
+	}
+	due, err := msgs.Due(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 2 || due[0].MessageID != 10 || due[1].MessageID != 11 {
+		t.Fatalf("due = %+v, want message_ids 10,11", due)
+	}
+	if err := msgs.Remove(ctx, chatID, []int{10, 11}); err != nil {
+		t.Fatal(err)
+	}
+	due, err = msgs.Due(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("due after remove = %+v, want empty", due)
+	}
 }

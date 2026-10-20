@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"strconv"
@@ -66,7 +67,7 @@ func displayName(u *tgbotapi.User) string {
 	return "пользователь"
 }
 
-func (h *Handler) sendVideo(d delivery, v *domain.Video) error {
+func (h *Handler) sendVideo(d delivery, v *domain.Video) ([]int, error) {
 	// VideoConfig in tgbotapi v5 has no Width/Height fields, but Telegram needs them
 	// for correct aspect in the in-app player — send via UploadFiles.
 	params := tgbotapi.Params{}
@@ -84,29 +85,39 @@ func (h *Handler) sendVideo(d delivery, v *domain.Video) error {
 	if v.ThumbnailPath != "" {
 		files = append(files, tgbotapi.RequestFile{Name: "thumb", Data: tgbotapi.FilePath(v.ThumbnailPath)})
 	}
-	_, err := h.api.UploadFiles("sendVideo", params, files)
-	return err
+	resp, err := h.api.UploadFiles("sendVideo", params, files)
+	if err != nil {
+		return nil, err
+	}
+	id, err := messageIDFromResult(resp.Result)
+	if err != nil {
+		return nil, err
+	}
+	return []int{id}, nil
 }
 
 // sendPost sends the post's photos and videos as one message (an album for
 // carousels) with the caption.
-func (h *Handler) sendPost(d delivery, p *domain.Post) error {
+func (h *Handler) sendPost(d delivery, p *domain.Post) ([]int, error) {
 	if len(p.Items) == 0 {
-		return fmt.Errorf("post has no photos")
+		return nil, fmt.Errorf("post has no photos")
 	}
 
 	caption := captionHTML(d.header, p.Caption)
+	var ids []int
 	for start := 0; start < len(p.Items); start += maxAlbumSize {
 		chunk := p.Items[start:min(start+maxAlbumSize, len(p.Items))]
 		chunkCaption := ""
 		if start == 0 {
 			chunkCaption = caption
 		}
-		if err := h.sendItems(d, chunk, start, chunkCaption); err != nil {
-			return err
+		chunkIDs, err := h.sendItems(d, chunk, start, chunkCaption)
+		if err != nil {
+			return ids, err
 		}
+		ids = append(ids, chunkIDs...)
 	}
-	return nil
+	return ids, nil
 }
 
 // captionHTML renders the header followed by the content as Telegram HTML,
@@ -169,7 +180,7 @@ func truncateText(s string, limit int) string {
 
 // sendItems sends up to maxAlbumSize photos and videos; albums need at least
 // two items. offset numbers the uploaded files across chunks.
-func (h *Handler) sendItems(d delivery, items []domain.PostItem, offset int, caption string) error {
+func (h *Handler) sendItems(d delivery, items []domain.PostItem, offset int, caption string) ([]int, error) {
 	if len(items) == 1 {
 		var cfg tgbotapi.Chattable
 		file := itemFile(items[0], offset)
@@ -189,8 +200,11 @@ func (h *Handler) sendItems(d delivery, items []domain.PostItem, offset int, cap
 			photo.ParseMode = tgbotapi.ModeHTML
 			cfg = photo
 		}
-		_, err := h.api.Send(cfg)
-		return err
+		sent, err := h.api.Send(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return []int{sent.MessageID}, nil
 	}
 
 	media := make([]interface{}, len(items))
@@ -214,8 +228,15 @@ func (h *Handler) sendItems(d delivery, items []domain.PostItem, offset int, cap
 	}
 	album := tgbotapi.NewMediaGroup(d.chatID, media)
 	album.ReplyToMessageID = d.replyTo
-	_, err := h.api.SendMediaGroup(album)
-	return err
+	sent, err := h.api.SendMediaGroup(album)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int, len(sent))
+	for i, m := range sent {
+		ids[i] = m.MessageID
+	}
+	return ids, nil
 }
 
 func itemFile(it domain.PostItem, index int) tgbotapi.RequestFileData {
@@ -226,15 +247,26 @@ func itemFile(it domain.PostItem, index int) tgbotapi.RequestFileData {
 	return tgbotapi.FileBytes{Name: fmt.Sprintf("item%d.%s", index+1, ext), Bytes: it.Data}
 }
 
-func (h *Handler) sendMedia(d delivery, m domain.Media) error {
+func (h *Handler) sendMedia(d delivery, m domain.Media) ([]int, error) {
 	switch {
 	case m.Video != nil:
 		return h.sendVideo(d, m.Video)
 	case m.Post != nil:
 		return h.sendPost(d, m.Post)
 	default:
-		return fmt.Errorf("empty media")
+		return nil, fmt.Errorf("empty media")
 	}
+}
+
+func messageIDFromResult(raw json.RawMessage) (int, error) {
+	var msg tgbotapi.Message
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return 0, fmt.Errorf("decode sent message: %w", err)
+	}
+	if msg.MessageID == 0 {
+		return 0, fmt.Errorf("sent message has no id")
+	}
+	return msg.MessageID, nil
 }
 
 func utf16Len(s string) int {

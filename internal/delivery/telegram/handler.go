@@ -18,6 +18,9 @@ const (
 	statusText    = "Погоди, скачиваю...."
 	rateLimitText = "Слишком много ссылок, попробуй чуть позже."
 	busyText      = "Сейчас много загрузок, попробуй чуть позже."
+
+	// MessageTTL is how long bot-sent media and replies stay in a chat.
+	MessageTTL = 72 * time.Hour
 )
 
 type Limits struct {
@@ -29,13 +32,14 @@ type Limits struct {
 }
 
 type Handler struct {
-	api     *tgbotapi.BotAPI
-	media   *usecase.MediaService
-	members *usecase.MembershipService
-	limits  Limits
-	slots   chan struct{}
-	pending atomic.Int64
-	wg      sync.WaitGroup
+	api      *tgbotapi.BotAPI
+	media    *usecase.MediaService
+	members  *usecase.MembershipService
+	messages *usecase.MessageService
+	limits   Limits
+	slots    chan struct{}
+	pending  atomic.Int64
+	wg       sync.WaitGroup
 	// rights caches whether the bot may delete messages, by chat ID.
 	rights sync.Map
 }
@@ -47,13 +51,14 @@ type deleteRight struct {
 
 const rightsTTL = 5 * time.Minute
 
-func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, limits Limits) *Handler {
+func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, messages *usecase.MessageService, limits Limits) *Handler {
 	return &Handler{
-		api:     api,
-		media:   media,
-		members: members,
-		limits:  limits,
-		slots:   make(chan struct{}, limits.MaxConcurrent),
+		api:      api,
+		media:    media,
+		members:  members,
+		messages: messages,
+		limits:   limits,
+		slots:    make(chan struct{}, limits.MaxConcurrent),
 	}
 }
 
@@ -64,6 +69,12 @@ func (h *Handler) Run(ctx context.Context) {
 	cfg.Timeout = 60
 	cfg.AllowedUpdates = []string{"message", "my_chat_member"}
 	updates := h.api.GetUpdatesChan(cfg)
+
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.runCleanup(ctx)
+	}()
 
 	defer h.wg.Wait()
 	for {
@@ -123,13 +134,13 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	if !h.allow(msg) {
+	if !h.allow(ctx, msg) {
 		return
 	}
 	if h.pending.Add(1) > int64(h.limits.MaxQueue) {
 		h.pending.Add(-1)
 		log.Printf("queue full, dropping link in chat %d", msg.Chat.ID)
-		h.reply(msg, busyText)
+		h.reply(ctx, msg, busyText)
 		return
 	}
 
@@ -170,8 +181,9 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	h.deleteMessage(msg.Chat.ID, status)
 	status = 0
 
-	err = h.sendMedia(d, media)
+	ids, err := h.sendMedia(d, media)
 	media.Release()
+	h.scheduleDelete(ctx, msg.Chat.ID, ids)
 	if err != nil {
 		log.Printf("telegram send failed: %v", err)
 		return
@@ -190,7 +202,7 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 }
 
 // allow applies per-user and per-chat rate limits, warning once per window.
-func (h *Handler) allow(msg *tgbotapi.Message) bool {
+func (h *Handler) allow(ctx context.Context, msg *tgbotapi.Message) bool {
 	keys := []string{fmt.Sprintf("chat:%d", msg.Chat.ID)}
 	limiters := []*usecase.RateLimiter{h.limits.PerChat}
 	if msg.From != nil {
@@ -205,20 +217,23 @@ func (h *Handler) allow(msg *tgbotapi.Message) bool {
 		}
 		log.Printf("rate limited %s", keys[i])
 		if first {
-			h.reply(msg, rateLimitText)
+			h.reply(ctx, msg, rateLimitText)
 		}
 		return false
 	}
 	return true
 }
 
-func (h *Handler) reply(msg *tgbotapi.Message, text string) {
+func (h *Handler) reply(ctx context.Context, msg *tgbotapi.Message, text string) {
 	cfg := tgbotapi.NewMessage(msg.Chat.ID, text)
 	cfg.ReplyToMessageID = msg.MessageID
 	cfg.AllowSendingWithoutReply = true
-	if _, err := h.api.Send(cfg); err != nil {
+	sent, err := h.api.Send(cfg)
+	if err != nil {
 		log.Printf("reply failed: %v", err)
+		return
 	}
+	h.scheduleDelete(ctx, msg.Chat.ID, []int{sent.MessageID})
 }
 
 func (h *Handler) sendStatus(msg *tgbotapi.Message) int {

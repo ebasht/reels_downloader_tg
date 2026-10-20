@@ -57,8 +57,9 @@ func main() {
 		listing.NewFetcher(cfg.PostFetchTimeout),
 		postgres.NewDownloadRepository(pool),
 	)
+	messages := usecase.NewMessageService(postgres.NewMessageRepository(pool), telegram.MessageTTL)
 
-	telegram.NewHandler(api, media, members, telegram.Limits{
+	telegram.NewHandler(api, media, members, messages, telegram.Limits{
 		MaxConcurrent: cfg.MaxConcurrent,
 		MaxQueue:      cfg.MaxQueue,
 		PerUser:       usecase.NewRateLimiter(cfg.UserRateLimit, cfg.RateWindow),
