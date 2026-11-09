@@ -58,7 +58,12 @@ func main() {
 		postgres.NewDownloadRepository(pool),
 	)
 
-	telegram.NewHandler(api, media, members, telegram.Limits{
+	cleanup := usecase.NewCleanupService(postgres.NewDeletionRepository(pool), cfg.MessageTTL)
+	if cleanup.Enabled() {
+		log.Printf("bot messages are deleted after %s", cfg.MessageTTL)
+	}
+
+	telegram.NewHandler(api, media, members, cleanup, telegram.Limits{
 		MaxConcurrent: cfg.MaxConcurrent,
 		MaxQueue:      cfg.MaxQueue,
 		PerUser:       usecase.NewRateLimiter(cfg.UserRateLimit, cfg.RateWindow),

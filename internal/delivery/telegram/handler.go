@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -15,7 +16,6 @@ import (
 )
 
 const (
-	statusText    = "Погоди, скачиваю...."
 	rateLimitText = "Слишком много ссылок, попробуй чуть позже."
 	busyText      = "Сейчас много загрузок, попробуй чуть позже."
 )
@@ -32,6 +32,7 @@ type Handler struct {
 	api     *tgbotapi.BotAPI
 	media   *usecase.MediaService
 	members *usecase.MembershipService
+	cleanup *usecase.CleanupService
 	limits  Limits
 	slots   chan struct{}
 	pending atomic.Int64
@@ -45,20 +46,24 @@ type deleteRight struct {
 	at      time.Time
 }
 
-const rightsTTL = 5 * time.Minute
+const (
+	rightsTTL       = 5 * time.Minute
+	cleanupInterval = time.Minute
+)
 
-func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, limits Limits) *Handler {
+func NewHandler(api *tgbotapi.BotAPI, media *usecase.MediaService, members *usecase.MembershipService, cleanup *usecase.CleanupService, limits Limits) *Handler {
 	return &Handler{
 		api:     api,
 		media:   media,
 		members: members,
+		cleanup: cleanup,
 		limits:  limits,
 		slots:   make(chan struct{}, limits.MaxConcurrent),
 	}
 }
 
-// Run polls Telegram for updates until ctx is cancelled, then waits for
-// in-flight downloads to finish.
+// Run polls Telegram for updates and deletes expired bot messages until ctx
+// is cancelled, then waits for in-flight downloads to finish.
 func (h *Handler) Run(ctx context.Context) {
 	cfg := tgbotapi.NewUpdate(0)
 	cfg.Timeout = 60
@@ -66,6 +71,11 @@ func (h *Handler) Run(ctx context.Context) {
 	updates := h.api.GetUpdatesChan(cfg)
 
 	defer h.wg.Wait()
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.cleanup.Run(ctx, h, cleanupInterval)
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,9 +167,7 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 		d.replyTo = msg.MessageID
 	}
 
-	status := h.sendStatus(msg)
-	defer func() { h.deleteMessage(msg.Chat.ID, status) }()
-
+	// On any failure the original link stays in the chat.
 	media, err := h.media.Fetch(ctx, link)
 	if err != nil {
 		log.Printf("fetch failed: %v", err)
@@ -167,11 +175,11 @@ func (h *Handler) processLink(ctx context.Context, msg *tgbotapi.Message, link d
 	}
 	defer media.Release()
 
-	h.deleteMessage(msg.Chat.ID, status)
-	status = 0
-
-	err = h.sendMedia(d, media)
+	sentIDs, err := h.sendMedia(d, media)
 	media.Release()
+	if err := h.cleanup.Schedule(ctx, msg.Chat.ID, sentIDs); err != nil {
+		log.Printf("schedule cleanup: %v", err)
+	}
 	if err != nil {
 		log.Printf("telegram send failed: %v", err)
 		return
@@ -221,18 +229,6 @@ func (h *Handler) reply(msg *tgbotapi.Message, text string) {
 	}
 }
 
-func (h *Handler) sendStatus(msg *tgbotapi.Message) int {
-	cfg := tgbotapi.NewMessage(msg.Chat.ID, statusText)
-	cfg.ReplyToMessageID = msg.MessageID
-	cfg.AllowSendingWithoutReply = true
-	sent, err := h.api.Send(cfg)
-	if err != nil {
-		log.Printf("status message failed: %v", err)
-		return 0
-	}
-	return sent.MessageID
-}
-
 // canDelete reports whether the bot may delete other members' messages in
 // the group. Private chats keep the user's message.
 func (h *Handler) canDelete(chat *tgbotapi.Chat) bool {
@@ -253,6 +249,7 @@ func (h *Handler) canDelete(chat *tgbotapi.Chat) bool {
 		return false
 	}
 	allowed := member.Status == "creator" || (member.Status == "administrator" && member.CanDeleteMessages)
+	log.Printf("bot rights in chat %d: status=%s can_delete_messages=%v", chat.ID, member.Status, member.CanDeleteMessages)
 	h.rights.Store(chat.ID, deleteRight{allowed: allowed, at: time.Now()})
 	return allowed
 }
@@ -261,9 +258,21 @@ func (h *Handler) deleteMessage(chatID int64, messageID int) {
 	if messageID == 0 {
 		return
 	}
-	if _, err := h.api.Request(tgbotapi.NewDeleteMessage(chatID, messageID)); err != nil {
+	if err := h.DeleteMessage(chatID, messageID); err != nil {
 		log.Printf("delete message failed: %v", err)
 	}
+}
+
+// DeleteMessage deletes a message, reporting domain.ErrMessageGone when
+// Telegram refuses for good: already deleted, older than 48 hours, or the bot
+// is no longer in the chat.
+func (h *Handler) DeleteMessage(chatID int64, messageID int) error {
+	_, err := h.api.Request(tgbotapi.NewDeleteMessage(chatID, messageID))
+	var apiErr *tgbotapi.Error
+	if errors.As(err, &apiErr) && (apiErr.Code == 400 || apiErr.Code == 403) {
+		return fmt.Errorf("%w: %v", domain.ErrMessageGone, err)
+	}
+	return err
 }
 
 func toDomainChat(c *tgbotapi.Chat) domain.Chat {

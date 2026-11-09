@@ -100,4 +100,38 @@ func TestChatRepository(t *testing.T) {
 	if reels != 2 || posts != 1 || listings != 1 || rows != 4 {
 		t.Fatalf("reels=%d posts=%d listings=%d rows=%d, want 2/1/1/4", reels, posts, listings, rows)
 	}
+
+	deletions := NewDeletionRepository(pool)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM scheduled_deletions WHERE chat_id = $1`, chatID)
+	})
+	if err := deletions.ScheduleDeletion(ctx, chatID, []int{10, 11}, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := deletions.ScheduleDeletion(ctx, chatID, []int{12}, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	due, err := deletions.DueDeletions(ctx, now, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mine []int
+	for _, d := range due {
+		if d.ChatID == chatID {
+			mine = append(mine, d.MessageID)
+		}
+	}
+	if len(mine) != 2 {
+		t.Fatalf("due messages = %v, want [10 11]", mine)
+	}
+	if err := deletions.RemoveDeletion(ctx, chatID, 10); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM scheduled_deletions WHERE chat_id = $1`, chatID).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 2 {
+		t.Fatalf("scheduled left = %d, want 2", left)
+	}
 }

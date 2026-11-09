@@ -19,8 +19,13 @@ type Config struct {
 	MaxVideoDuration time.Duration
 	DownloadTimeout  time.Duration
 	PostFetchTimeout time.Duration
-	Debug            bool
+	// MessageTTL is how long the bot's media messages stay in chats; 0 keeps them.
+	MessageTTL time.Duration
+	Debug      bool
 }
+
+// Telegram lets bots delete messages only within 48 hours of sending.
+const maxMessageTTL = 47 * time.Hour
 
 func Load() (Config, error) {
 	cfg := Config{
@@ -34,6 +39,7 @@ func Load() (Config, error) {
 		MaxVideoDuration: 10 * time.Minute,
 		DownloadTimeout:  3 * time.Minute,
 		PostFetchTimeout: 30 * time.Second,
+		MessageTTL:       10 * time.Hour,
 		Debug:            os.Getenv("BOT_DEBUG") == "true",
 	}
 	if cfg.BotToken == "" {
@@ -70,6 +76,14 @@ func Load() (Config, error) {
 		if err := parsePositiveDuration(v.name, v.dst); err != nil {
 			return cfg, err
 		}
+	}
+
+	if v := os.Getenv("MESSAGE_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 || d > maxMessageTTL {
+			return cfg, fmt.Errorf("invalid MESSAGE_TTL %q: want 0 (keep messages) up to %s", v, maxMessageTTL)
+		}
+		cfg.MessageTTL = d
 	}
 	return cfg, nil
 }
